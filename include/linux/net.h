@@ -20,11 +20,11 @@
 
 
 #include <linux/wait.h>
+#include <linux/socket.h>
 
 
 #define NSOCKETS	128		/* should be dynamic, later...	*/
 #define NPROTO		16		/* should be enough for now..	*/
-#define SOCKET_MAJOR	16		/* Linux VFS major dev number	*/
 
 
 #define SYS_SOCKET	1		/* sys_socket(2)		*/
@@ -49,7 +49,7 @@ typedef enum {
   SS_UNCONNECTED,			/* unconnected to any socket	*/
   SS_CONNECTING,			/* in process of connecting	*/
   SS_CONNECTED,				/* connected to socket		*/
-  SS_DISCONNECTING,			/* in process of disconnecting	*/
+  SS_DISCONNECTING			/* in process of disconnecting	*/
 } socket_state;
 
 #define SO_ACCEPTCON	(1<<16)		/* performed a listen		*/
@@ -76,13 +76,10 @@ struct socket {
   struct socket		*iconn;		/* incomplete client conn.s	*/
   struct socket		*next;
   struct wait_queue	**wait;		/* ptr to place to wait on	*/
-  void			*dummy;
+  struct inode		*inode;
 };
 
-#define SOCK_INODE(S)	((struct inode *)(S)->dummy)
-extern struct socket	sockets[NSOCKETS];
-#define last_socket	(sockets + NSOCKETS - 1)
-
+#define SOCK_INODE(S)	((S)->inode)
 
 struct proto_ops {
   int	family;

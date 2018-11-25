@@ -23,7 +23,7 @@
 #include <linux/stat.h>
 #include <linux/locks.h>
 
-#define	NBUF	16
+#define	NBUF	32
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
 #define MAX(a,b) (((a)>(b))?(a):(b))
@@ -149,6 +149,9 @@ static int ext_file_read(struct inode * inode, struct file * filp, char * buf, i
 			if (*bhe) {
 				wait_on_buffer(*bhe);
 				if (!(*bhe)->b_uptodate) {	/* read error? */
+				        brelse(*bhe);
+					if (++bhe == &buflist[NBUF])
+					  bhe = buflist;
 					left = 0;
 					break;
 				}
@@ -247,8 +250,7 @@ static int ext_file_write(struct inode * inode, struct file * filp, char * buf, 
 		bh->b_dirt = 1;
 		brelse(bh);
 	}
-	inode->i_mtime = CURRENT_TIME;
-	inode->i_ctime = CURRENT_TIME;
+	inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 	filp->f_pos = pos;
 	inode->i_dirt = 1;
 	return written;

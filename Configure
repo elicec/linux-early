@@ -158,8 +158,9 @@ function int () {
 	eval "$2=$ans"
 }
 
-CONFIG=.config~
+CONFIG=.tmpconfig
 CONFIG_H=include/linux/autoconf.h
+trap "rm -f $CONFIG $CONFIG_H config.new ; exit 1" 1 2
 
 #
 # Make sure we start out with a clean slate.
@@ -202,6 +203,7 @@ do
 		:)	[ "$branch" = "t" ] && echo "$raw_input_line" ;;
 		int)	[ "$branch" = "t" ] && int "$rest" ;;
 		bool)	[ "$branch" = "t" ] && bool "$rest" ;;
+		exec)	[ "$branch" = "t" ] && ( sh -c "$rest" ) ;;
 		if)	stack="$branch $stack"
 			if [ "$branch" = "t" ] && eval "$rest"; then
 				branch=t

@@ -5,10 +5,45 @@
  *
  *		The Internet Protocol (IP) module.
  *
- * Version:	@(#)ip.c	1.0.16	06/02/93
+ * Version:	@(#)ip.c	1.0.16b	9/1/93
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
+ *		Donald Becker, <becker@super.org>
+ *
+ * Fixes:
+ *		Alan Cox	:	Commented a couple of minor bits of surplus code
+ *		Alan Cox	:	Undefining IP_FORWARD doesn't include the code
+ *					(just stops a compiler warning).
+ *		Alan Cox	:	Frames with >=MAX_ROUTE record routes, strict routes or loose routes
+ *					are junked rather than corrupting things.
+ *		Alan Cox	:	Frames to bad broadcast subnets are dumped
+ *					We used to process them non broadcast and
+ *					boy could that cause havoc.
+ *		Alan Cox	:	ip_forward sets the free flag on the 
+ *					new frame it queues. Still crap because
+ *					it copies the frame but at least it 
+ *					doesn't eat memory too.
+ *		Alan Cox	:	Generic queue code and memory fixes.
+ *		Fred Van Kempen :	IP fragment support (borrowed from NET2E)
+ *		Gerhard Koerting:	Forward fragmented frames correctly.
+ *		Gerhard Koerting: 	Fixes to my fix of the above 8-).
+ *		Gerhard Koerting:	IP interface addressing fix.
+ *		Linus Torvalds	:	More robustness checks
+ *		Alan Cox	:	Even more checks: Still not as robust as it ought to be
+ *		Alan Cox	:	Save IP header pointer for later
+ *		Alan Cox	:	ip option setting
+ *		Alan Cox	:	Use ip_tos/ip_ttl settings
+ *		Alan Cox	:	Fragmentation bogosity removed
+ *					(Thanks to Mark.Bush@prg.ox.ac.uk)
+ *		Dmitry Gorodchanin :	Send of a raw packet crash fix.
+ *		Alan Cox	:	Silly ip bug when an overlength
+ *					fragment turns up. Now frees the
+ *					queue.
+ *
+ * To Fix:
+ *		IP option processing is mostly not needed. ip_forward needs to know about routing rules
+ *		and time stamp but that's about all.
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -26,7 +61,6 @@
 #include <linux/sockios.h>
 #include <linux/in.h>
 #include "inet.h"
-#include "timer.h"
 #include "dev.h"
 #include "eth.h"
 #include "ip.h"
@@ -38,8 +72,13 @@
 #include "arp.h"
 #include "icmp.h"
 
+#define CONFIG_IP_FORWARD
+#define CONFIG_IP_DEFRAG
+
 extern int last_retran;
 extern void sort_send(struct sock *sk);
+
+#define min(a,b)	((a)<(b)?(a):(b))
 
 void
 ip_print(struct iphdr *ip)
@@ -147,7 +186,7 @@ ip_send(struct sk_buff *skb, unsigned long daddr, int len, struct device *dev,
   unsigned char *ptr;
   int mac;
 
-  ptr = (unsigned char *)(skb + 1);
+  ptr = skb->data;
   mac = 0;
   skb->arp = 1;
   if (dev->hard_header) {
@@ -170,7 +209,7 @@ ip_send(struct sk_buff *skb, unsigned long daddr, int len, struct device *dev,
  */
 int
 ip_build_header(struct sk_buff *skb, unsigned long saddr, unsigned long daddr,
-		struct device **dev, int type, struct options *opt, int len)
+		struct device **dev, int type, struct options *opt, int len, int tos, int ttl)
 {
   static struct options optmem;
   struct iphdr *iph;
@@ -180,19 +219,24 @@ ip_build_header(struct sk_buff *skb, unsigned long saddr, unsigned long daddr,
   static int count = 0;
   int tmp;
 
-  if (saddr == 0) saddr = my_addr();
+  if (saddr == 0) 
+  	saddr = my_addr();
+  	
   DPRINTF((DBG_IP, "ip_build_header (skb=%X, saddr=%X, daddr=%X, *dev=%X,\n"
 	   "                 type=%d, opt=%X, len = %d)\n",
 	   skb, saddr, daddr, *dev, type, opt, len));
-  buff = (unsigned char *)(skb + 1);
+	   
+  buff = skb->data;
 
   /* See if we need to look up the device. */
   if (*dev == NULL) {
 	rt = rt_route(daddr, &optmem);
-	if (rt == NULL) return(-ENETUNREACH);
+	if (rt == NULL) 
+		return(-ENETUNREACH);
 
 	*dev = rt->rt_dev;
-	if (daddr != 0x0100007F) saddr = rt->rt_dev->pa_addr;
+	if (saddr == 0x0100007FL && daddr != 0x0100007FL) 
+		saddr = rt->rt_dev->pa_addr;
 	raddr = rt->rt_gateway;
 
 	DPRINTF((DBG_IP, "ip_build_header: saddr set to %s\n", in_ntoa(saddr)));
@@ -202,7 +246,8 @@ ip_build_header(struct sk_buff *skb, unsigned long saddr, unsigned long daddr,
 	rt = rt_route(daddr, &optmem);
 	raddr = (rt == NULL) ? 0 : rt->rt_gateway;
   }
-  if (raddr == 0) raddr = daddr;
+  if (raddr == 0)
+  	raddr = daddr;
 
   /* Now build the MAC header. */
   tmp = ip_send(skb, raddr, len, *dev, saddr);
@@ -222,9 +267,9 @@ ip_build_header(struct sk_buff *skb, unsigned long saddr, unsigned long daddr,
 
   iph = (struct iphdr *)buff;
   iph->version  = 4;
-  iph->tos      = 0;
+  iph->tos      = tos;
   iph->frag_off = 0;
-  iph->ttl      = 32;
+  iph->ttl      = ttl;
   iph->daddr    = daddr;
   iph->saddr    = saddr;
   iph->protocol = type;
@@ -296,6 +341,8 @@ do_options(struct iphdr *iph, struct options *opt)
 		buff++;
 		buff++;
 		for (i = 0; i < opt->loose_route.route_size; i++) {
+			if(i>=MAX_ROUTE)
+				return(1);
 			opt->loose_route.route[i] = *(unsigned long *)buff;
 			buff += 4;
 		}
@@ -311,6 +358,8 @@ do_options(struct iphdr *iph, struct options *opt)
 		buff++;
 		buff++;
 		for (i = 0; i < opt->strict_route.route_size; i++) {
+			if(i>=MAX_ROUTE)
+				return(1);
 			opt->strict_route.route[i] = *(unsigned long *)buff;
 			buff += 4;
 		}
@@ -326,6 +375,8 @@ do_options(struct iphdr *iph, struct options *opt)
 		buff++;
 		buff++;
 		for (i = 0; i < opt->record_route.route_size; i++) {
+			if(i>=MAX_ROUTE)
+				return 1;
 			opt->record_route.route[i] = *(unsigned long *)buff;
 			buff += 4;
 		}
@@ -381,6 +432,31 @@ do_options(struct iphdr *iph, struct options *opt)
   return(0);
 }
 
+/* This is a version of ip_compute_csum() optimized for IP headers, which
+   always checksum on 4 octet boundaries. */
+static inline unsigned short
+ip_fast_csum(unsigned char * buff, int wlen)
+{
+    unsigned long sum = 0;
+
+    if (wlen) {
+    	unsigned long bogus;
+	 __asm__("clc\n"
+		"1:\t"
+		"lodsl\n\t"
+		"adcl %3, %0\n\t"
+		"decl %2\n\t"
+		"jne 1b\n\t"
+		"adcl $0, %0\n\t"
+		"movl %0, %3\n\t"
+		"shrl $16, %3\n\t"
+		"addw %w3, %w0\n\t"
+		"adcw $0, %w0"
+	    : "=r" (sum), "=S" (buff), "=r" (wlen), "=a" (bogus)
+	    : "0"  (sum),  "1" (buff),  "2" (wlen));
+    }
+    return (~sum) & 0xffff;
+}
 
 /*
  * This routine does all the checksum computations that don't
@@ -393,33 +469,33 @@ ip_compute_csum(unsigned char * buff, int len)
 
   /* Do the first multiple of 4 bytes and convert to 16 bits. */
   if (len > 3) {
-	__asm__("\t clc\n"
-	        "1:\n"
-	        "\t lodsl\n"
-	        "\t adcl %%eax, %%ebx\n"
-	        "\t loop 1b\n"
-	        "\t adcl $0, %%ebx\n"
-	        "\t movl %%ebx, %%eax\n"
-	        "\t shrl $16, %%eax\n"
-	        "\t addw %%ax, %%bx\n"
-	        "\t adcw $0, %%bx\n"
+	__asm__("clc\n"
+	        "1:\t"
+	    	"lodsl\n\t"
+	    	"adcl %%eax, %%ebx\n\t"
+	    	"loop 1b\n\t"
+	    	"adcl $0, %%ebx\n\t"
+	    	"movl %%ebx, %%eax\n\t"
+	    	"shrl $16, %%eax\n\t"
+	    	"addw %%ax, %%bx\n\t"
+	    	"adcw $0, %%bx"
 	        : "=b" (sum) , "=S" (buff)
 	        : "0" (sum), "c" (len >> 2) ,"1" (buff)
 	        : "ax", "cx", "si", "bx" );
   }
   if (len & 2) {
-	__asm__("\t lodsw\n"
-	        "\t addw %%ax, %%bx\n"
-	        "\t adcw $0, %%bx\n"
+	__asm__("lodsw\n\t"
+	    	"addw %%ax, %%bx\n\t"
+	    	"adcw $0, %%bx"
 	        : "=b" (sum), "=S" (buff)
 	        : "0" (sum), "1" (buff)
 	        : "bx", "ax", "si");
   }
   if (len & 1) {
-	__asm__("\t lodsb\n"
-	        "\t movb $0, %%ah\n"
-	        "\t addw %%ax, %%bx\n"
-	        "\t adcw $0, %%bx\n"
+	__asm__("lodsb\n\t"
+	    	"movb $0, %%ah\n\t"
+	    	"addw %%ax, %%bx\n\t"
+	    	"adcw $0, %%bx"
 	        : "=b" (sum), "=S" (buff)
 	        : "0" (sum), "1" (buff)
 	        : "bx", "ax", "si");
@@ -428,29 +504,588 @@ ip_compute_csum(unsigned char * buff, int len)
   return(sum & 0xffff);
 }
 
-
-/* Check the header of an incoming IP datagram. */
+/* Check the header of an incoming IP datagram.  This version is still used in slhc.c. */
 int
 ip_csum(struct iphdr *iph)
 {
-  if (iph->check == 0) return(0);
-  if (ip_compute_csum((unsigned char *)iph, iph->ihl*4) == 0) return(0);
-  return(1);
+  return ip_fast_csum((unsigned char *)iph, iph->ihl);
 }
-
 
 /* Generate a checksym for an outgoing IP datagram. */
 static void
 ip_send_check(struct iphdr *iph)
 {
    iph->check = 0;
-   iph->check = ip_compute_csum((unsigned char *)iph, iph->ihl*4);
+   iph->check = ip_fast_csum((unsigned char *)iph, iph->ihl);
 }
 
+/************************ Fragment Handlers From NET2E not yet with tweaks to beat 4K **********************************/
+
+static struct ipq *ipqueue = NULL;		/* IP fragment queue	*/
+ /* Create a new fragment entry. */
+static struct ipfrag *ip_frag_create(int offset, int end, struct sk_buff *skb, unsigned char *ptr)
+{
+   	struct ipfrag *fp;
+ 
+   	fp = (struct ipfrag *) kmalloc(sizeof(struct ipfrag), GFP_ATOMIC);
+   	if (fp == NULL) 
+   	{
+	 	printk("IP: frag_create: no memory left !\n");
+	 	return(NULL);
+   	}
+  	memset(fp, 0, sizeof(struct ipfrag));
+
+        /* Fill in the structure. */
+	fp->offset = offset;
+	fp->end = end;
+	fp->len = end - offset;
+	fp->skb = skb;
+	fp->ptr = ptr;
+ 
+	return(fp);
+}
+ 
+ 
+/*
+ * Find the correct entry in the "incomplete datagrams" queue for
+ * this IP datagram, and return the queue entry address if found.
+ */
+static struct ipq *ip_find(struct iphdr *iph)
+{
+	struct ipq *qp;
+	struct ipq *qplast;
+ 
+	cli();
+	qplast = NULL;
+	for(qp = ipqueue; qp != NULL; qplast = qp, qp = qp->next) 
+	{
+ 		if (iph->id== qp->iph->id && iph->saddr == qp->iph->saddr &&
+			iph->daddr == qp->iph->daddr && iph->protocol == qp->iph->protocol) 
+		{
+			del_timer(&qp->timer);	/* So it doesnt vanish on us. The timer will be reset anyway */
+ 			sti();
+ 			return(qp);
+ 		}
+   	}
+	sti();
+	return(NULL);
+}
+ 
+ 
+/*
+ * Remove an entry from the "incomplete datagrams" queue, either
+ * because we completed, reassembled and processed it, or because
+ * it timed out.
+ */
+
+static void ip_free(struct ipq *qp)
+{
+	struct ipfrag *fp;
+	struct ipfrag *xp;
+
+	/* Stop the timer for this entry. */
+/*	printk("ip_free\n");*/
+	del_timer(&qp->timer);
+
+	/* Remove this entry from the "incomplete datagrams" queue. */
+	cli();
+	if (qp->prev == NULL) 
+	{
+	 	ipqueue = qp->next;
+	 	if (ipqueue != NULL) 
+	 		ipqueue->prev = NULL;
+   	} 
+   	else 
+   	{
+ 		qp->prev->next = qp->next;
+ 		if (qp->next != NULL) 
+ 			qp->next->prev = qp->prev;
+   	}
+ 
+   	/* Release all fragment data. */
+/*   	printk("ip_free: kill frag data\n");*/
+   	fp = qp->fragments;
+   	while (fp != NULL) 
+   	{
+ 		xp = fp->next;
+ 		IS_SKB(fp->skb);
+ 		kfree_skb(fp->skb,FREE_READ);
+ 		kfree_s(fp, sizeof(struct ipfrag));
+ 		fp = xp;
+   	}
+   	
+/*   	printk("ip_free: cleanup\n");*/
+ 
+   	/* Release the MAC header. */
+   	kfree_s(qp->mac, qp->maclen);
+ 
+   	/* Release the IP header. */
+   	kfree_s(qp->iph, qp->ihlen + 8);
+ 
+   	/* Finally, release the queue descriptor itself. */
+   	kfree_s(qp, sizeof(struct ipq));
+/*   	printk("ip_free:done\n");*/
+   	sti();
+ }
+ 
+ 
+ /* Oops- a fragment queue timed out.  Kill it and send an ICMP reply. */
+ 
+static void ip_expire(unsigned long arg)
+{
+   	struct ipq *qp;
+ 
+   	qp = (struct ipq *)arg;
+   	DPRINTF((DBG_IP, "IP: queue_expire: fragment queue 0x%X timed out!\n", qp));
+ 
+   	/* Send an ICMP "Fragment Reassembly Timeout" message. */
+#if 0   	
+   	icmp_send(qp->iph->ip_src.s_addr, ICMP_TIME_EXCEEDED,
+ 		    ICMP_EXC_FRAGTIME, qp->iph);
+#endif 		 
+ 	if(qp->fragments!=NULL)
+ 		icmp_send(qp->fragments->skb,ICMP_TIME_EXCEEDED,
+ 				ICMP_EXC_FRAGTIME, qp->dev);
+ 
+   	/* Nuke the fragment queue. */
+	ip_free(qp);
+}
+ 
+ 
+/*
+ * Add an entry to the 'ipq' queue for a newly received IP datagram.
+ * We will (hopefully :-) receive all other fragments of this datagram
+ * in time, so we just create a queue for this datagram, in which we
+ * will insert the received fragments at their respective positions.
+ */
+
+static struct ipq *ip_create(struct sk_buff *skb, struct iphdr *iph, struct device *dev)
+{
+  	struct ipq *qp;
+  	int maclen;
+  	int ihlen;
+
+  	qp = (struct ipq *) kmalloc(sizeof(struct ipq), GFP_ATOMIC);
+  	if (qp == NULL) 
+  	{
+		printk("IP: create: no memory left !\n");
+		return(NULL);
+  	}
+ 	memset(qp, 0, sizeof(struct ipq));
+
+  	/* Allocate memory for the MAC header. */
+  	maclen = ((unsigned long) iph) - ((unsigned long) skb->data);
+  	qp->mac = (unsigned char *) kmalloc(maclen, GFP_ATOMIC);
+  	if (qp->mac == NULL) 
+  	{
+		printk("IP: create: no memory left !\n");
+		kfree_s(qp, sizeof(struct ipq));
+		return(NULL);
+  	}
+
+  	/* Allocate memory for the IP header (plus 8 octects for ICMP). */
+  	ihlen = (iph->ihl * sizeof(unsigned long));
+  	qp->iph = (struct iphdr *) kmalloc(ihlen + 8, GFP_ATOMIC);
+  	if (qp->iph == NULL) 
+  	{
+		printk("IP: create: no memory left !\n");
+		kfree_s(qp->mac, maclen);
+		kfree_s(qp, sizeof(struct ipq));
+		return(NULL);
+  	}
+
+  	/* Fill in the structure. */
+  	memcpy(qp->mac, skb->data, maclen);
+ 	memcpy(qp->iph, iph, ihlen + 8);
+  	qp->len = 0;
+  	qp->ihlen = ihlen;
+  	qp->maclen = maclen;
+  	qp->fragments = NULL;
+  	qp->dev = dev;
+/*  	printk("Protocol = %d\n",qp->iph->protocol);*/
+	
+  	/* Start a timer for this entry. */
+  	qp->timer.expires = IP_FRAG_TIME;		/* about 30 seconds	*/
+  	qp->timer.data = (unsigned long) qp;		/* pointer to queue	*/
+  	qp->timer.function = ip_expire;			/* expire function	*/
+  	add_timer(&qp->timer);
+
+  	/* Add this entry to the queue. */
+  	qp->prev = NULL;
+  	cli();
+  	qp->next = ipqueue;
+  	if (qp->next != NULL) 
+  		qp->next->prev = qp;
+  	ipqueue = qp;
+  	sti();
+  	return(qp);
+}
+ 
+ 
+ /* See if a fragment queue is complete. */
+static int ip_done(struct ipq *qp)
+{
+	struct ipfrag *fp;
+	int offset;
+ 
+   	/* Only possible if we received the final fragment. */
+   	if (qp->len == 0) 
+   		return(0);
+ 
+   	/* Check all fragment offsets to see if they connect. */
+  	fp = qp->fragments;
+   	offset = 0;
+   	while (fp != NULL) 
+   	{
+ 		if (fp->offset > offset) 
+ 			return(0);	/* fragment(s) missing */
+ 		offset = fp->end;
+ 		fp = fp->next;
+   	}
+ 
+   	/* All fragments are present. */
+   	return(1);
+ }
+ 
+ 
+/* Build a new IP datagram from all its fragments. */
+static struct sk_buff *ip_glue(struct ipq *qp)
+{
+	struct sk_buff *skb;
+   	struct iphdr *iph;
+   	struct ipfrag *fp;
+   	unsigned char *ptr;
+   	int count, len;
+ 
+   	/* Allocate a new buffer for the datagram. */
+   	len = sizeof(struct sk_buff)+qp->maclen + qp->ihlen + qp->len;
+   	if ((skb = alloc_skb(len,GFP_ATOMIC)) == NULL) 
+   	{
+ 		printk("IP: queue_glue: no memory for glueing queue 0x%X\n", (int) qp);
+ 		ip_free(qp);
+ 		return(NULL);
+   	}
+ 
+   	/* Fill in the basic details. */
+   	skb->len = (len - qp->maclen);
+   	skb->h.raw = skb->data;
+   	skb->free = 1;
+ 
+   	/* Copy the original MAC and IP headers into the new buffer. */
+   	ptr = (unsigned char *) skb->h.raw;
+   	memcpy(ptr, ((unsigned char *) qp->mac), qp->maclen);
+/*   	printk("Copied %d bytes of mac header.\n",qp->maclen);*/
+   	ptr += qp->maclen;
+   	memcpy(ptr, ((unsigned char *) qp->iph), qp->ihlen);
+/*   	printk("Copied %d byte of ip header.\n",qp->ihlen);*/
+   	ptr += qp->ihlen;
+   	skb->h.raw += qp->maclen;
+   	
+/*   	printk("Protocol = %d\n",skb->h.iph->protocol);*/
+   	count = 0;
+ 
+   	/* Copy the data portions of all fragments into the new buffer. */
+   	fp = qp->fragments;
+   	while(fp != NULL) 
+   	{
+   		if(count+fp->len>skb->len)
+   		{
+   			printk("Invalid fragment list: Fragment over size.\n");
+   			ip_free(qp);
+   			kfree_skb(skb,FREE_WRITE);
+   			return NULL;
+   		}
+/*   		printk("Fragment %d size %d\n",fp->offset,fp->len);*/
+ 		memcpy((ptr + fp->offset), fp->ptr, fp->len);
+ 		count += fp->len;
+ 		fp = fp->next;
+   	}
+ 
+   	/* We glued together all fragments, so remove the queue entry. */
+   	ip_free(qp);
+ 
+   	/* Done with all fragments. Fixup the new IP header. */
+   	iph = skb->h.iph;
+   	iph->frag_off = 0;
+   	iph->tot_len = htons((iph->ihl * sizeof(unsigned long)) + count);
+   	skb->ip_hdr = iph;
+   	return(skb);
+}
+ 
+
+/* Process an incoming IP datagram fragment. */
+static struct sk_buff *ip_defrag(struct iphdr *iph, struct sk_buff *skb, struct device *dev)
+{
+	struct ipfrag *prev, *next;
+	struct ipfrag *tfp;
+	struct ipq *qp;
+	struct sk_buff *skb2;
+	unsigned char *ptr;
+	int flags, offset;
+	int i, ihl, end;
+
+	/* Find the entry of this IP datagram in the "incomplete datagrams" queue. */
+   	qp = ip_find(iph);
+ 
+   	/* Is this a non-fragmented datagram? */
+   	offset = ntohs(iph->frag_off);
+   	flags = offset & ~IP_OFFSET;
+   	offset &= IP_OFFSET;
+   	if (((flags & IP_MF) == 0) && (offset == 0)) 
+   	{
+ 		if (qp != NULL) 
+ 			ip_free(qp);	/* Huh? How could this exist?? */
+ 		return(skb);
+   	}
+   	offset <<= 3;		/* offset is in 8-byte chunks */
+ 
+   	/*
+    	 * If the queue already existed, keep restarting its timer as long
+   	 * as we still are receiving fragments.  Otherwise, create a fresh
+    	 * queue entry.
+    	 */
+   	if (qp != NULL) 
+   	{
+ 		del_timer(&qp->timer);
+ 		qp->timer.expires = IP_FRAG_TIME;	/* about 30 seconds	*/
+ 		qp->timer.data = (unsigned long) qp;	/* pointer to queue	*/
+ 		qp->timer.function = ip_expire;		/* expire function	*/
+ 		add_timer(&qp->timer);
+   	} 
+   	else 
+   	{
+ 		if ((qp = ip_create(skb, iph, dev)) == NULL) 
+ 			return(NULL);
+   	}
+ 
+   	/* Determine the position of this fragment. */
+   	ihl = (iph->ihl * sizeof(unsigned long));
+   	end = offset + ntohs(iph->tot_len) - ihl;
+ 
+   	/* Point into the IP datagram 'data' part. */
+   	ptr = skb->data + dev->hard_header_len + ihl;
+ 
+   	/* Is this the final fragment? */
+   	if ((flags & IP_MF) == 0) 
+   		qp->len = end;
+ 
+   	/*
+   	 * Find out which fragments are in front and at the back of us
+   	 * in the chain of fragments so far.  We must know where to put
+   	 * this fragment, right?
+   	 */
+   	prev = NULL;
+   	for(next = qp->fragments; next != NULL; next = next->next) 
+   	{
+ 		if (next->offset > offset) 
+ 			break;	/* bingo! */
+ 		prev = next;
+   	}	
+ 
+   	/*
+   	 * We found where to put this one.
+   	 * Check for overlap with preceeding fragment, and, if needed,
+   	 * align things so that any overlaps are eliminated.
+   	 */
+   	if (prev != NULL && offset < prev->end) 
+   	{
+ 		i = prev->end - offset;
+ 		offset += i;	/* ptr into datagram */
+ 		ptr += i;	/* ptr into fragment data */
+ 		DPRINTF((DBG_IP, "IP: defrag: fixed low overlap %d bytes\n", i));
+   	}	
+ 
+   	/*
+    	 * Look for overlap with succeeding segments.
+    	 * If we can merge fragments, do it.
+      	 */
+   
+   	for(; next != NULL; next = tfp) 
+   	{
+ 		tfp = next->next;
+ 		if (next->offset >= end) 
+ 			break;		/* no overlaps at all */
+ 
+ 		i = end - next->offset;			/* overlap is 'i' bytes */
+ 		next->len -= i;				/* so reduce size of	*/
+ 		next->offset += i;			/* next fragment	*/
+ 		next->ptr += i;
+ 		
+ 		/* If we get a frag size of <= 0, remove it. */
+ 		if (next->len <= 0) 
+ 		{
+ 			DPRINTF((DBG_IP, "IP: defrag: removing frag 0x%X (len %d)\n",
+ 							next, next->len));
+ 			if (next->prev != NULL) 
+ 				next->prev->next = next->next;
+ 		  	else 
+ 		  		qp->fragments = next->next;
+ 		
+ 			if (tfp->next != NULL) 
+ 				next->next->prev = next->prev;
+ 			
+ 			kfree_s(next, sizeof(struct ipfrag));
+ 		}
+ 		DPRINTF((DBG_IP, "IP: defrag: fixed high overlap %d bytes\n", i));
+   	}
+ 
+   	/* Insert this fragment in the chain of fragments. */
+   	tfp = NULL;
+   	tfp = ip_frag_create(offset, end, skb, ptr);
+   	tfp->prev = prev;
+   	tfp->next = next;
+   	if (prev != NULL) 
+   		prev->next = tfp;
+     	else 
+     		qp->fragments = tfp;
+   
+   	if (next != NULL) 
+   		next->prev = tfp;
+ 
+   	/*
+    	 * OK, so we inserted this new fragment into the chain.
+    	 * Check if we now have a full IP datagram which we can
+    	 * bump up to the IP layer...
+    	 */
+   
+   	if (ip_done(qp)) 
+   	{
+ 		skb2 = ip_glue(qp);		/* glue together the fragments */
+ 		return(skb2);
+   	}
+   	return(NULL);
+ }
+ 
+ 
+ /*
+  * This IP datagram is too large to be sent in one piece.  Break it up into
+  * smaller pieces (each of size equal to the MAC header plus IP header plus
+  * a block of the data of the original IP data part) that will yet fit in a
+  * single device frame, and queue such a frame for sending by calling the
+  * ip_queue_xmit().  Note that this is recursion, and bad things will happen
+  * if this function causes a loop...
+  */
+ void ip_fragment(struct sock *sk, struct sk_buff *skb, struct device *dev, int is_frag)
+ {
+   	struct iphdr *iph;
+   	unsigned char *raw;
+   	unsigned char *ptr;
+   	struct sk_buff *skb2;
+   	int left, mtu, hlen, len;
+   	int offset;
+ 
+   	/* Point into the IP datagram header. */
+   	raw = skb->data;
+   	iph = (struct iphdr *) (raw + dev->hard_header_len);
+
+	skb->ip_hdr = iph;
+	 	
+   	/* Setup starting values. */
+   	hlen = (iph->ihl * sizeof(unsigned long));
+   	left = ntohs(iph->tot_len) - hlen;
+   	hlen += dev->hard_header_len;
+   	mtu = (dev->mtu - hlen);
+   	ptr = (raw + hlen);
+ 	
+   	DPRINTF((DBG_IP, "IP: Fragmentation Desired\n"));
+   	DPRINTF((DBG_IP, "    DEV=%s, MTU=%d, LEN=%d SRC=%s",
+ 		dev->name, dev->mtu, left, in_ntoa(iph->saddr)));
+   	DPRINTF((DBG_IP, " DST=%s\n", in_ntoa(iph->daddr)));
+ 
+   	/* Check for any "DF" flag. */
+   	if (ntohs(iph->frag_off) & IP_DF) 
+   	{
+ 		DPRINTF((DBG_IP, "IP: Fragmentation Desired, but DF set !\n"));
+ 		DPRINTF((DBG_IP, "    DEV=%s, MTU=%d, LEN=%d SRC=%s",
+ 			dev->name, dev->mtu, left, in_ntoa(iph->saddr)));
+ 		DPRINTF((DBG_IP, " DST=%s\n", in_ntoa(iph->daddr)));
+ 
+ 		/*
+ 		 * FIXME:
+ 		 * We should send an ICMP warning message here!
+ 		 */
+ 		 
+ 		icmp_send(skb,ICMP_DEST_UNREACH, ICMP_FRAG_NEEDED, dev); 
+ 		return;
+   	}
+ 
+   	/* Fragment the datagram. */
+	if (is_frag & 2)
+	  offset = (ntohs(iph->frag_off) & 0x1fff) << 3;
+	else
+   	  offset = 0;
+   	while(left > 0) 
+   	{
+ 		len = left;
+#ifdef OLD 		
+ 		if (len+8 > mtu) 
+ 			len = (dev->mtu - hlen - 8);
+ 		if ((left - len) >= 8) 
+ 		{
+ 			len /= 8;
+ 			len *= 8;
+ 		}
+#else
+		/* IF: it doesn't fit, use 'mtu' - the data space left */
+		if (len > mtu)
+			len = mtu;
+		/* IF: we are not sending upto and including the packet end
+		   then align the next start on an eight byte boundary */
+		if (len < left)
+		{
+			len/=8;
+			len*=8;
+		}
+#endif		 		
+ 		DPRINTF((DBG_IP,"IP: frag: creating fragment of %d bytes (%d total)\n",
+ 							len, len + hlen));
+ 
+ 		/* Allocate buffer. */
+ 		if ((skb2 = alloc_skb(sizeof(struct sk_buff) + len + hlen,GFP_ATOMIC)) == NULL) 
+ 		{
+ 			printk("IP: frag: no memory for new fragment!\n");
+ 			return;
+ 		}
+ 		skb2->arp = skb->arp;
+ 		skb2->free = skb->free;
+ 		skb2->len = len + hlen;
+ 		skb2->h.raw=(char *) skb2->data;
+ 
+ 		if (sk) 
+ 			sk->wmem_alloc += skb2->mem_len;
+ 
+ 		/* Copy the packet header into the new buffer. */
+ 		memcpy(skb2->h.raw, raw, hlen);
+ 
+ 		/* Copy a block of the IP datagram. */
+ 		memcpy(skb2->h.raw + hlen, ptr, len);
+ 		left -= len;
+
+		skb2->h.raw+=dev->hard_header_len; 
+ 		/* Fill in the new header fields. */
+ 		iph = (struct iphdr *)(skb2->h.raw/*+dev->hard_header_len*/);
+ 		iph->frag_off = htons((offset >> 3));
+ 		/* Added AC : If we are fragmenting a fragment thats not the
+ 		   last fragment then keep MF on each bit */
+ 		if (left > 0 || (is_frag & 1)) 
+ 			iph->frag_off |= htons(IP_MF);
+ 		ptr += len;
+ 		offset += len;
+/* 		printk("Queue frag\n");*/
+ 
+ 		/* Put this fragment into the sending queue. */
+ 		ip_queue_xmit(sk, dev, skb2, 1);
+/* 		printk("Queued\n");*/
+   	}
+ }
+ 
+
+
+#ifdef CONFIG_IP_FORWARD
 
 /* Forward an IP datagram to its next destination. */
 static void
-ip_forward(struct sk_buff *skb, struct device *dev)
+ip_forward(struct sk_buff *skb, struct device *dev, int is_frag)
 {
   struct device *dev2;
   struct iphdr *iph;
@@ -459,6 +1094,17 @@ ip_forward(struct sk_buff *skb, struct device *dev)
   unsigned char *ptr;
   unsigned long raddr;
 
+  /*
+   * Only forward packets that were fired at us when we are in promiscuous
+   * mode. In standard mode we rely on the driver to filter for us.
+   */
+   
+  if(dev->flags&IFF_PROMISC)
+  {
+  	if(memcmp((char *)&skb[1],dev->dev_addr,dev->addr_len))
+  		return;
+  }
+  
   /*
    * According to the RFC, we must first decrease the TTL field. If
    * that reaches zero, we must reply an ICMP control message telling
@@ -492,6 +1138,7 @@ ip_forward(struct sk_buff *skb, struct device *dev)
 	return;
   }
 
+
   /*
    * Gosh.  Not only is the packet valid; we even know how to
    * forward it onto its final destination.  Can we say this
@@ -513,6 +1160,9 @@ ip_forward(struct sk_buff *skb, struct device *dev)
   } else raddr = iph->daddr;
   dev2 = rt->rt_dev;
 
+
+  if (dev == dev2)
+	return;
   /*
    * We now allocate a new buffer, and copy the datagram into it.
    * If the indicated interface is up and running, kick it.
@@ -522,15 +1172,15 @@ ip_forward(struct sk_buff *skb, struct device *dev)
 			in_ntoa(raddr), dev2->name, skb->len));
 
   if (dev2->flags & IFF_UP) {
-	skb2 = (struct sk_buff *) kmalloc(sizeof(struct sk_buff) +
+	skb2 = (struct sk_buff *) alloc_skb(sizeof(struct sk_buff) +
 		       dev2->hard_header_len + skb->len, GFP_ATOMIC);
 	if (skb2 == NULL) {
 		printk("\nIP: No memory available for IP forward\n");
 		return;
 	}
-	ptr = (unsigned char *)(skb2 + 1);
-	skb2->lock = 0;
+	ptr = skb2->data;
 	skb2->sk = NULL;
+	skb2->free = 1;
 	skb2->len = skb->len + dev2->hard_header_len;
 	skb2->mem_addr = skb2;
 	skb2->mem_len = sizeof(struct sk_buff) + skb2->len;
@@ -538,36 +1188,43 @@ ip_forward(struct sk_buff *skb, struct device *dev)
 	skb2->h.raw = ptr;
 
 	/* Copy the packet data into the new buffer. */
-	skb2->h.raw = ptr;
 	memcpy(ptr + dev2->hard_header_len, skb->h.raw, skb->len);
 		
 	/* Now build the MAC header. */
 	(void) ip_send(skb2, raddr, skb->len, dev2, dev2->pa_addr);
 
-	dev2->queue_xmit(skb2, dev2, SOPRI_NORMAL);
+	if(skb2->len > dev2->mtu)
+	{
+		ip_fragment(NULL,skb2,dev2, is_frag);
+		kfree_skb(skb2,FREE_WRITE);
+	}
+	else
+		dev2->queue_xmit(skb2, dev2, SOPRI_NORMAL);
   }
 }
 
+
+#endif
 
 /* This function receives all incoming IP datagrams. */
 int
 ip_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 {
-  struct iphdr *iph;
+  struct iphdr *iph = skb->h.iph;
   unsigned char hash;
   unsigned char flag = 0;
+  unsigned char opts_p = 0;	/* Set iff the packet has options. */
   struct inet_protocol *ipprot;
   static struct options opt; /* since we don't use these yet, and they
 				take up stack space. */
   int brd;
+  int is_frag=0;
 
-  iph = skb->h.iph;
-  memset((char *) &opt, 0, sizeof(opt));
   DPRINTF((DBG_IP, "<<\n"));
-  ip_print(iph);
 
+  skb->ip_hdr = iph;		/* Fragments can cause ICMP errors too! */
   /* Is the datagram acceptable? */
-  if (ip_csum(iph) || do_options(iph, &opt) || iph->version != 4) {
+  if (skb->len<sizeof(struct iphdr) || iph->ihl<5 || iph->version != 4 || ip_fast_csum((unsigned char *)iph, iph->ihl) !=0) {
 	DPRINTF((DBG_IP, "\nIP: *** datagram error ***\n"));
 	DPRINTF((DBG_IP, "    SRC = %s   ", in_ntoa(iph->saddr)));
 	DPRINTF((DBG_IP, "    DST = %s (ignored)\n", in_ntoa(iph->daddr)));
@@ -575,27 +1232,47 @@ ip_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 	kfree_skb(skb, FREE_WRITE);
 	return(0);
   }
+  
+  if (iph->ihl != 5) {  	/* Fast path for the typical optionless IP packet. */
+      ip_print(iph);		/* Bogus, only for debugging. */
+      memset((char *) &opt, 0, sizeof(opt));
+      if (do_options(iph, &opt) != 0)
+	  return 0;
+      opts_p = 1;
+  }
 
-  /* Do any IP forwarding required. */
+  if (iph->frag_off & 0x0020)
+  	is_frag|=1;
+  if (ntohs(iph->frag_off) & 0x1fff)
+  	is_frag|=2;
+  	
+  /* Do any IP forwarding required.  chk_addr() is expensive -- avoid it someday. */
   if ((brd = chk_addr(iph->daddr)) == 0) {
-	ip_forward(skb, dev);
+#ifdef CONFIG_IP_FORWARD
+	ip_forward(skb, dev, is_frag);
+#else
+	printk("Machine %x tried to use us as a forwarder to %x but we have forwarding disabled!\n",
+			iph->saddr,iph->daddr);
+#endif			
 	skb->sk = NULL;
 	kfree_skb(skb, FREE_WRITE);
 	return(0);
   }
 
   /*
-   * Deal with fragments: not really...
-   * Fragmentation is definitely a required part of IP (yeah, guys,
-   * I read Linux-Activists.NET too :-), but the current "sk_buff"
-   * allocation stuff doesn't make things simpler.  When we're all
-   * done cleaning up the mess, we'll add Ross Biro's "mbuf" stuff
-   * to the code, which will replace the sk_buff stuff completely.
-   * That will (a) make the code even cleaner, (b) allow me to do
-   * the DDI (Device Driver Interface) the way I want to, and (c),
-   * it will allow for easy addition of fragging.  Any takers? -FvK
+   * Reassemble IP fragments. 
    */
-  if ((iph->frag_off & 32) || (ntohs(iph->frag_off) & 0x1fff)) {
+
+  if(is_frag)
+  {
+#ifdef CONFIG_IP_DEFRAG
+        skb=ip_defrag(iph,skb,dev);
+        if(skb==NULL)
+        {
+        	return 0;
+        }
+        iph=skb->h.iph;
+#else
 	printk("\nIP: *** datagram fragmentation not yet implemented ***\n");
 	printk("    SRC = %s   ", in_ntoa(iph->saddr));
 	printk("    DST = %s (ignored)\n", in_ntoa(iph->daddr));
@@ -603,9 +1280,23 @@ ip_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 	skb->sk = NULL;
 	kfree_skb(skb, FREE_WRITE);
 	return(0);
+#endif
   }
 
+
+
+  if(brd==IS_INVBCAST)
+  {
+/*	printk("Invalid broadcast address from %x [target %x] (Probably they have a wrong netmask)\n",
+		iph->saddr,iph->daddr);*/
+  	skb->sk=NULL;
+  	kfree_skb(skb,FREE_WRITE);
+  	return(0);
+  }
+  
   /* Point into the IP datagram, just past the header. */
+
+  skb->ip_hdr = iph;
   skb->h.raw += iph->ihl*4;
   hash = iph->protocol & (MAX_INET_PROTOS -1);
   for (ipprot = (struct inet_protocol *)inet_protos[hash];
@@ -620,19 +1311,24 @@ ip_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 
        /*
 	* See if we need to make a copy of it.  This will
-	* only be set if more than one protpocol wants it. 
+	* only be set if more than one protocol wants it. 
 	* and then not for the last one.
 	*/
        if (ipprot->copy) {
-		skb2 = (struct sk_buff *) kmalloc (skb->mem_len, GFP_ATOMIC);
-		if (skb2 == NULL) continue;
+		skb2 = alloc_skb(skb->mem_len, GFP_ATOMIC);
+		if (skb2 == NULL) 
+			continue;
 		memcpy(skb2, skb, skb->mem_len);
 		skb2->mem_addr = skb2;
-		skb2->lock = 0;
+		skb2->ip_hdr = (struct iphdr *)(
+				(unsigned long)skb2 +
+				(unsigned long) skb->ip_hdr -
+				(unsigned long)skb);
 		skb2->h.raw = (unsigned char *)(
 				(unsigned long)skb2 +
 				(unsigned long) skb->h.raw -
 				(unsigned long)skb);
+		skb2->free=1;
 	} else {
 		skb2 = skb;
 	}
@@ -643,7 +1339,7 @@ ip_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 	* based on the datagram protocol.  We should really
 	* check the protocol handler's return values here...
 	*/
-	ipprot->handler(skb2, dev, &opt, iph->daddr,
+	ipprot->handler(skb2, dev, opts_p ? &opt : 0, iph->daddr,
 			(ntohs(iph->tot_len) - (iph->ihl * 4)),
 			iph->saddr, 0, ipprot);
 
@@ -685,15 +1381,27 @@ ip_queue_xmit(struct sock *sk, struct device *dev,
 	printk("IP: ip_queue_xmit dev = NULL\n");
 	return;
   }
+  IS_SKB(skb);
   skb->free = free;
   skb->dev = dev;
   skb->when = jiffies;
-
+  
   DPRINTF((DBG_IP, ">>\n"));
-  ptr = (unsigned char *)(skb + 1);
+  ptr = skb->data;
   ptr += dev->hard_header_len;
   iph = (struct iphdr *)ptr;
-  iph->tot_len = ntohs(skb->len - dev->hard_header_len);
+  skb->ip_hdr = iph;
+  iph->tot_len = ntohs(skb->len-dev->hard_header_len);
+
+  if(skb->len > dev->mtu)
+  {
+/*  	printk("Fragment!\n");*/
+  	ip_fragment(sk,skb,dev,0);
+  	IS_SKB(skb);
+  	kfree_skb(skb,FREE_WRITE);
+  	return;
+  }
+  
   ip_send_check(iph);
   ip_print(iph);
   skb->next = NULL;
@@ -718,9 +1426,7 @@ ip_queue_xmit(struct sock *sk, struct device *dev,
 		}
 	}
 	sti();
-	sk->time_wait.len = backoff(sk->backoff) * (2 * sk->mdev + sk->rtt);
-        sk->timeout = TIME_WRITE;
-        reset_timer ((struct timer *)&sk->time_wait);
+	reset_timer(sk, TIME_WRITE, sk->rto);
   } else {
 	skb->sk = sk;
   }
@@ -729,7 +1435,8 @@ ip_queue_xmit(struct sock *sk, struct device *dev,
   if (dev->flags & IFF_UP) {
 	if (sk != NULL) {
 		dev->queue_xmit(skb, dev, sk->priority);
-	} else {
+	} 
+	else {
 		dev->queue_xmit(skb, dev, SOPRI_NORMAL);
 	}
   } else {
@@ -739,39 +1446,55 @@ ip_queue_xmit(struct sock *sk, struct device *dev,
 
 
 void
-ip_retransmit(struct sock *sk, int all)
+ip_do_retransmit(struct sock *sk, int all)
 {
   struct sk_buff * skb;
   struct proto *prot;
   struct device *dev;
+  int retransmits;
 
   prot = sk->prot;
   skb = sk->send_head;
+  retransmits = sk->retransmits;
   while (skb != NULL) {
 	dev = skb->dev;
+	/* I know this can't happen but as it does.. */
+	if(dev==NULL)
+	{
+		printk("ip_retransmit: NULL device bug!\n");
+		goto oops;
+	}
 
+	IS_SKB(skb);
+	
 	/*
 	 * The rebuild_header function sees if the ARP is done.
 	 * If not it sends a new ARP request, and if so it builds
 	 * the header.
 	 */
+        cli();	/* We might get interrupted by an arp reply here and fill
+		   the frame in twice. Because of the technique used this
+		   would be a little sad */
 	if (!skb->arp) {
-		if (dev->rebuild_header((struct enet_header *)(skb+1),dev)) {
+		if (dev->rebuild_header(skb->data, dev)) {
+			sti();	/* Failed to rebuild - next */
 			if (!all) break;
 			skb = (struct sk_buff *)skb->link3;
 			continue;
 		}
 	}
 	skb->arp = 1;
+	sti();
 	skb->when = jiffies;
 
 	/* If the interface is (still) up and running, kick it. */
 	if (dev->flags & IFF_UP) {
-		if (sk) dev->queue_xmit(skb, dev, sk->priority);
-		  else dev->queue_xmit(skb, dev, SOPRI_NORMAL );
+		if (sk && !skb_device_locked(skb))
+			dev->queue_xmit(skb, dev, sk->priority);
+	/*	  else dev->queue_xmit(skb, dev, SOPRI_NORMAL ); CANNOT HAVE SK=NULL HERE */
 	}
 
-	sk->retransmits++;
+oops:	retransmits++;
 	sk->prot->retransmits ++;
 	if (!all) break;
 
@@ -779,30 +1502,105 @@ ip_retransmit(struct sock *sk, int all)
 	if (sk->retransmits > sk->cong_window) break;
 	skb = (struct sk_buff *)skb->link3;
   }
-
-  /*
-   * Double the RTT time every time we retransmit. 
-   * This will cause exponential back off on how hard we try to
-   * get through again.  Once we get through, the rtt will settle
-   * back down reasonably quickly.
-   */
-  sk->backoff++;
-  sk->time_wait.len = backoff(sk->backoff) * (2 * sk->mdev + sk->rtt);
-  sk->timeout = TIME_WRITE;
-  reset_timer((struct timer *)&sk->time_wait);
-
 }
 
-/* Backoff function - the subject of much research */
-int backoff(int n)
-{
-	/* Use binary exponential up to retry #4, and quadratic after that
-	 * This yields the sequence
-	 * 1, 2, 4, 8, 16, 25, 36, 49, 64, 81, 100 ...
-	 */
+/*
+ * This is the normal code called for timeouts.  It does the retransmission
+ * and then does backoff.  ip_do_retransmit is separated out because
+ * tcp_ack needs to send stuff from the retransmit queue without
+ * initiating a backoff.
+ */
 
-	if(n <= 4)
-		return 1 << n;	/* Binary exponential back off */
-	else
-		return n * n;	/* Quadratic back off */
+void
+ip_retransmit(struct sock *sk, int all)
+{
+  ip_do_retransmit(sk, all);
+
+  /*
+   * Increase the timeout each time we retransmit.  Note that
+   * we do not increase the rtt estimate.  rto is initialized
+   * from rtt, but increases here.  Jacobson (SIGCOMM 88) suggests
+   * that doubling rto each time is the least we can get away with.
+   * In KA9Q, Karns uses this for the first few times, and then
+   * goes to quadratic.  netBSD doubles, but only goes up to *64,
+   * and clamps at 1 to 64 sec afterwards.  Note that 120 sec is
+   * defined in the protocol as the maximum possible RTT.  I guess
+   * we'll have to use something other than TCP to talk to the
+   * University of Mars.
+   */
+
+  sk->retransmits++;
+  sk->backoff++;
+  sk->rto = min(sk->rto << 1, 120*HZ);
+  reset_timer(sk, TIME_WRITE, sk->rto);
+}
+
+/*
+ *	Socket option code for IP. This is the end of the line after any TCP,UDP etc options on
+ *	an IP socket.
+ */
+ 
+int ip_setsockopt(struct sock *sk, int level, int optname, char *optval, int optlen)
+{
+	int val,err;
+	
+  	if (optval == NULL) 
+  		return(-EINVAL);
+
+  	err=verify_area(VERIFY_READ, optval, sizeof(int));
+  	if(err)
+  		return err;
+  	
+  	val = get_fs_long((unsigned long *)optval);
+
+	if(level!=SOL_IP)
+		return -EOPNOTSUPP;
+
+	switch(optname)
+	{
+		case IP_TOS:
+			if(val<0||val>255)
+				return -EINVAL;
+			sk->ip_tos=val;
+			return 0;
+		case IP_TTL:
+			if(val<1||val>255)
+				return -EINVAL;
+			sk->ip_ttl=val;
+			return 0;
+		/* IP_OPTIONS and friends go here eventually */
+		default:
+			return(-ENOPROTOOPT);
+	}
+}
+
+int ip_getsockopt(struct sock *sk, int level, int optname, char *optval, int *optlen)
+{
+	int val,err;
+	
+	if(level!=SOL_IP)
+		return -EOPNOTSUPP;
+		
+	switch(optname)
+	{
+		case IP_TOS:
+			val=sk->ip_tos;
+			break;
+		case IP_TTL:
+			val=sk->ip_ttl;
+			break;
+		default:
+			return(-ENOPROTOOPT);
+	}
+	err=verify_area(VERIFY_WRITE, optlen, sizeof(int));
+	if(err)
+  		return err;
+  	put_fs_long(sizeof(int),(unsigned long *) optlen);
+
+  	err=verify_area(VERIFY_WRITE, optval, sizeof(int));
+  	if(err)
+  		return err;
+  	put_fs_long(val,(unsigned long *)optval);
+
+  	return(0);
 }

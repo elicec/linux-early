@@ -15,13 +15,10 @@
 	$(AS) -o $*.o $<
 
 OBJS=	proc.o sock.o inode.o file.o dir.o \
-	symlink.o 
+	symlink.o mmap.o
 
 nfs.o: $(OBJS)
 	$(LD) -r -o nfs.o $(OBJS)
-
-clean:
-	rm -f core *.o *.a *.s
 
 dep:
 	$(CPP) -M *.c > .depend

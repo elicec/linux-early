@@ -104,8 +104,7 @@ int do_select(int n, fd_set *in, fd_set *out, fd_set *ex,
 	}
 end_check:
 	n = max + 1;
-	entry = (struct select_table_entry *) __get_free_page(GFP_KERNEL);
-	if (!entry)
+	if(!(entry = (struct select_table_entry*) __get_free_page(GFP_KERNEL)))
 		return -ENOMEM;
 	FD_ZERO(res_in);
 	FD_ZERO(res_out);
@@ -193,7 +192,7 @@ __set_fd_set(nr, (unsigned long *) (fsp), (unsigned long *) (fdp))
  * Update: ERESTARTSYS breaks at least the xview clock binary, so
  * I'm trying ERESTARTNOHAND which restart only when you want to.
  */
-extern "C" int sys_select( unsigned long *buffer )
+asmlinkage int sys_select( unsigned long *buffer )
 {
 /* Perform the select(nd, in, out, ex, tv) system call. */
 	int i;
@@ -219,16 +218,15 @@ extern "C" int sys_select( unsigned long *buffer )
 	if ((i = get_fd_set(n, inp, &in)) ||
 	    (i = get_fd_set(n, outp, &out)) ||
 	    (i = get_fd_set(n, exp, &ex))) return i;
-	timeout = 0xffffffff;
+	timeout = ~0UL;
 	if (tvp) {
 		i = verify_area(VERIFY_WRITE, tvp, sizeof(*tvp));
 		if (i)
 			return i;
-		timeout = jiffies;
-		timeout += ROUND_UP(get_fs_long((unsigned long *)&tvp->tv_usec),(1000000/HZ));
+		timeout = ROUND_UP(get_fs_long((unsigned long *)&tvp->tv_usec),(1000000/HZ));
 		timeout += get_fs_long((unsigned long *)&tvp->tv_sec) * HZ;
-		if (timeout <= jiffies)
-			timeout = 0;
+		if (timeout)
+			timeout += jiffies + 1;
 	}
 	current->timeout = timeout;
 	i = do_select(n, &in, &out, &ex, &res_in, &res_out, &res_ex);

@@ -12,7 +12,6 @@
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/xia_fs.h>
-#include <linux/tty.h>
 #include <linux/stat.h>
 #include <linux/fcntl.h>
 
@@ -193,9 +192,6 @@ void xiafs_truncate(struct inode * inode)
 	current->counter = 0;
 	schedule();
     }
-    inode->i_atime = inode->i_ctime = inode->i_mtime = CURRENT_TIME;
+    inode->i_ctime = inode->i_mtime = CURRENT_TIME;
     inode->i_dirt = 1;
 }
-
-
-

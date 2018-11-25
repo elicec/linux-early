@@ -8,18 +8,17 @@
 # Note 2! The CFLAGS definition is now in the main makefile...
 
 .c.o:
-	$(CC) $(CFLAGS) \
-	-c -o $*.o $<
+	$(CC) $(CFLAGS) -c -o $*.o $<
 .s.o:
 	$(AS) -o $*.o $<
 .c.s:
-	$(CC) $(CFLAGS) \
-	-S -o $*.s $<
+	$(CC) $(CFLAGS) -S -o $*.s $<
 
 
-OBJS	= Space.o sock.o utils.o route.o proc.o timer.o protocol.o loopback.o \
-	  eth.o packet.o arp.o dev.o 8390.o wd.o ne.o el.o hp.o plip.o \
-	  slip.o slhc.o d_link.o auto_irq.o ip.o raw.o icmp.o tcp.o udp.o
+OBJS	= sock.o utils.o route.o proc.o timer.o protocol.o loopback.o \
+	  eth.o packet.o arp.o dev.o ip.o raw.o icmp.o tcp.o udp.o \
+	  datagram.o skbuff.o
+#	  ipx.o ax25.o ax25_in.o ax25_out.o ax25_subr.o ax25_timer.o
 
 ifdef CONFIG_INET
 
@@ -32,44 +31,6 @@ inet.o:
 		echo | $(AS) -o inet.o
 
 endif
-
-include	CONFIG
-
-
-Space.o:	CONFIG Space.c Makefile
-		$(CC) $(CPPFLAGS) $(CFLAGS) $(OPTS) $(CARDS) $(DL_OPTS) \
-							-c Space.c -o $@
-
-8390.o:		CONFIG 8390.c Makefile
-		$(CC) $(CPPFLAGS) $(CFLAGS) $(CARDS) -c 8390.c -o $@
-
-wd.o:		CONFIG wd.c Makefile
-		$(CC) $(CPPFLAGS) $(CFLAGS) $(WD_OPTS) -c wd.c -o $@
-
-el.o:		CONFIG el.c elreg.h Makefile
-		$(CC) $(CPPFLAGS) $(CFLAGS) $(EL_OPTS) -c el.c -o $@
-
-ne.o:		CONFIG ne.c Makefile
-		$(CC) $(CPPFLAGS) $(CFLAGS) $(NE_OPTS) -c ne.c -o $@
-
-hp.o:		CONFIG hp.c Makefile
-		$(CC) $(CPPFLAGS) $(CFLAGS) $(HP_OPTS) -c hp.c -o $@
-
-plip.o:		CONFIG plip.c Makefile
-		$(CC) $(CPPFLAGS) $(CFLAGS) $(PLIP_OPTS) -c plip.c -o $@
-
-slip.o:		CONFIG slip.c Makefile
-		$(CC) $(CPPFLAGS) $(CFLAGS) $(SLIP_OPTS) -c slip.c -o $@
-
-d_link.o:	CONFIG d_link.c Makefile
-		$(CC) $(CPPFLAGS) $(CFLAGS) $(DL_OPTS) -c d_link.c -o $@
-
-subdirs:	dummy
-		for i in $(SUBDIRS); do (cd $$i; $(MAKE)); done
-
-
-clean:
-		rm -f core *.o *.a *.s
 
 dep:
 		$(CPP) -M *.c > .depend

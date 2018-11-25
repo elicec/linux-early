@@ -1,11 +1,26 @@
 #ifndef _LINUX_MM_H
 #define _LINUX_MM_H
 
-#define PAGE_SIZE 4096
-#define PAGE_SHIFT 12
-
-#include <linux/fs.h>
+#include <linux/page.h>
+#include <linux/sched.h>
+#include <linux/errno.h>
 #include <linux/kernel.h>
+
+#define VERIFY_READ 0
+#define VERIFY_WRITE 1
+
+int __verify_write(unsigned long addr, unsigned long count);
+
+extern inline int verify_area(int type, const void * addr, unsigned long size)
+{
+	if (TASK_SIZE <= (unsigned long) addr)
+		return -EFAULT;
+	if (size > TASK_SIZE - (unsigned long) addr)
+		return -EFAULT;
+	if (wp_works_ok || type == VERIFY_READ || !size)
+		return 0;
+	return __verify_write((unsigned long) addr,size);
+}
 
 /*
  * Linux kernel virtual memory manager primitives.
@@ -47,6 +62,7 @@ struct vm_operations_struct {
 		       struct vm_area_struct * area, unsigned long address);
 	void (*wppage)(struct vm_area_struct * area, unsigned long address);
 	int (*share)(struct vm_area_struct * from, struct vm_area_struct * to, unsigned long address);
+	int (*unmap)(struct vm_area_struct *area, unsigned long, size_t);
 };
 
 extern unsigned long __bad_page(void);
@@ -65,7 +81,7 @@ extern unsigned long free_page_list;
 extern int nr_secondary_pages;
 extern unsigned long secondary_page_list;
 
-#define MAX_SECONDARY_PAGES 10
+#define MAX_SECONDARY_PAGES 20
 
 /*
  * This is timing-critical - most of the time in getting a new page
@@ -85,8 +101,6 @@ extern inline unsigned long get_free_page(int priority)
 			:"di","cx");
 	return page;
 }
-
-/* mmap.c */
 
 /* memory.c */
 
@@ -113,6 +127,12 @@ extern void show_mem(void);
 extern void oom(struct task_struct * task);
 extern void si_meminfo(struct sysinfo * val);
 
+/* vmalloc.c */
+
+extern void * vmalloc(unsigned long size);
+extern void vfree(void * addr);
+extern int vread(char *buf, char *addr, int count);
+
 /* swap.c */
 
 extern void swap_free(unsigned long page_nr);
@@ -124,6 +144,13 @@ extern void rw_swap_page(int rw, unsigned long nr, char * buf);
 /* mmap.c */
 extern int do_mmap(struct file * file, unsigned long addr, unsigned long len,
 	unsigned long prot, unsigned long flags, unsigned long off);
+typedef int (*map_mergep_fnp)(const struct vm_area_struct *,
+			      const struct vm_area_struct *, void *);
+extern void merge_segments(struct vm_area_struct *, map_mergep_fnp, void *);
+extern void insert_vm_struct(struct task_struct *, struct vm_area_struct *);
+extern int ignoff_mergep(const struct vm_area_struct *,
+			 const struct vm_area_struct *, void *);
+extern int do_munmap(unsigned long, size_t);
 
 #define read_swap_page(nr,buf) \
 	rw_swap_page(READ,(nr),(buf))

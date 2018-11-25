@@ -12,17 +12,21 @@
 
 #include <asm/system.h>
 
-static struct inode * hash_table[NR_IHASH];
+static struct inode_hash_entry {
+	struct inode * inode;
+	int updating;
+} hash_table[NR_IHASH];
+
 static struct inode * first_inode;
 static struct wait_queue * inode_wait = NULL;
 static int nr_inodes = 0, nr_free_inodes = 0;
 
-static inline int const hashfn(dev_t dev, int i)
+static inline int const hashfn(dev_t dev, unsigned int i)
 {
 	return (dev ^ i) % NR_IHASH;
 }
 
-static inline struct inode ** const hash(dev_t dev, int i)
+static inline struct inode_hash_entry * const hash(dev_t dev, int i)
 {
 	return hash_table + hashfn(dev, i);
 }
@@ -49,23 +53,23 @@ static void remove_inode_free(struct inode *inode)
 
 void insert_inode_hash(struct inode *inode)
 {
-	struct inode **h;
+	struct inode_hash_entry *h;
 	h = hash(inode->i_dev, inode->i_ino);
 
-	inode->i_hash_next = *h;
+	inode->i_hash_next = h->inode;
 	inode->i_hash_prev = NULL;
 	if (inode->i_hash_next)
 		inode->i_hash_next->i_hash_prev = inode;
-	*h = inode;
+	h->inode = inode;
 }
 
 static void remove_inode_hash(struct inode *inode)
 {
-	struct inode **h;
+	struct inode_hash_entry *h;
 	h = hash(inode->i_dev, inode->i_ino);
 
-	if (*h == inode)
-		*h = inode->i_hash_next;
+	if (h->inode == inode)
+		h->inode = inode->i_hash_next;
 	if (inode->i_hash_next)
 		inode->i_hash_next->i_hash_prev = inode->i_hash_prev;
 	if (inode->i_hash_prev)
@@ -84,24 +88,21 @@ static void put_last_free(struct inode *inode)
 
 void grow_inodes(void)
 {
-	unsigned long page;
 	struct inode * inode;
 	int i;
 
-	page = get_free_page(GFP_BUFFER);
-	if (!page)
+	if (!(inode = (struct inode*) get_free_page(GFP_KERNEL)))
 		return;
-	inode = (struct inode *) page;
-	for (i=0; i < (PAGE_SIZE / sizeof(struct inode)); i++, inode++) {
-		if (!first_inode) {
-			inode->i_next = inode;
-			inode->i_prev = inode;
-			first_inode = inode;
-		} else
-			insert_inode_free(inode);
-	}
+
+	i=PAGE_SIZE / sizeof(struct inode);
 	nr_inodes += i;
 	nr_free_inodes += i;
+
+	if (!first_inode)
+		inode->i_next = inode->i_prev = first_inode = inode++, i--;
+
+	for ( ; i ; i-- )
+		insert_inode_free(inode++);
 }
 
 unsigned long inode_init(unsigned long start, unsigned long end)
@@ -306,15 +307,13 @@ void iput(struct inode * inode)
 	wait_on_inode(inode);
 	if (!inode->i_count) {
 		printk("VFS: iput: trying to free free inode\n");
-		printk("VFS: device %d/%d, inode %d, mode=0%07o\n",
+		printk("VFS: device %d/%d, inode %lu, mode=0%07o\n",
 			MAJOR(inode->i_rdev), MINOR(inode->i_rdev),
 					inode->i_ino, inode->i_mode);
 		return;
 	}
-	if (inode->i_pipe) {
-		wake_up(&PIPE_READ_WAIT(*inode));
-		wake_up(&PIPE_WRITE_WAIT(*inode));
-	}
+	if (inode->i_pipe)
+		wake_up_interruptible(&PIPE_WAIT(*inode));
 repeat:
 	if (inode->i_count>1) {
 		inode->i_count--;
@@ -385,6 +384,7 @@ repeat:
 	clear_inode(inode);
 	inode->i_count = 1;
 	inode->i_nlink = 1;
+	inode->i_sem.count = 1;
 	nr_free_inodes--;
 	if (nr_free_inodes < 0) {
 		printk ("VFS: get_empty_inode: bad free inode count.\n");
@@ -400,16 +400,17 @@ struct inode * get_pipe_inode(void)
 
 	if (!(inode = get_empty_inode()))
 		return NULL;
-	if (!(PIPE_BASE(*inode) = (char *) get_free_page(GFP_USER))) {
+	if (!(PIPE_BASE(*inode) = (char*) __get_free_page(GFP_USER))) {
 		iput(inode);
 		return NULL;
 	}
 	inode->i_op = &pipe_inode_operations;
 	inode->i_count = 2;	/* sum of readers/writers */
-	PIPE_READ_WAIT(*inode) = PIPE_WRITE_WAIT(*inode) = NULL;
-	PIPE_HEAD(*inode) = PIPE_TAIL(*inode) = 0;
+	PIPE_WAIT(*inode) = NULL;
+	PIPE_START(*inode) = PIPE_LEN(*inode) = 0;
 	PIPE_RD_OPENERS(*inode) = PIPE_WR_OPENERS(*inode) = 0;
 	PIPE_READERS(*inode) = PIPE_WRITERS(*inode) = 1;
+	PIPE_LOCK(*inode) = 0;
 	inode->i_pipe = 1;
 	inode->i_mode |= S_IFIFO | S_IRUSR | S_IWUSR;
 	inode->i_uid = current->euid;
@@ -420,53 +421,32 @@ struct inode * get_pipe_inode(void)
 
 struct inode * iget(struct super_block * sb,int nr)
 {
-	struct inode * inode, * empty;
+	return __iget(sb,nr,1);
+}
+
+struct inode * __iget(struct super_block * sb, int nr, int crossmntp)
+{
+	static struct wait_queue * update_wait = NULL;
+	struct inode_hash_entry * h;
+	struct inode * inode;
+	struct inode * empty = NULL;
 
 	if (!sb)
 		panic("VFS: iget with sb==NULL");
-	empty = get_empty_inode();
+	h = hash(sb->s_dev, nr);
 repeat:
-	inode = *(hash(sb->s_dev,nr));
-	while (inode) {
-		if (inode->i_dev != sb->s_dev || inode->i_ino != nr) {
-			inode = inode->i_hash_next;
-			continue;
-		}
-		wait_on_inode(inode);
-		if (inode->i_dev != sb->s_dev || inode->i_ino != nr)
-			goto repeat;
-		if (!inode->i_count)
-			nr_free_inodes--;
-		inode->i_count++;
-		if (inode->i_mount) {
-			int i;
-
-			for (i = 0 ; i<NR_SUPER ; i++)
-				if (super_blocks[i].s_covered==inode)
-					break;
-			if (i >= NR_SUPER) {
-				printk("VFS: Mounted inode hasn't got sb\n");
-				if (empty)
-					iput(empty);
-				return inode;
-			}
-			iput(inode);
-			if (!(inode = super_blocks[i].s_mounted))
-				printk("VFS: Mounted device %d/%d has no rootinode\n",
-					MAJOR(inode->i_dev), MINOR(inode->i_dev));
-			else {
-				if (!inode->i_count)
-					nr_free_inodes--;
-				inode->i_count++;
-				wait_on_inode(inode);
-			}
-		}
+	for (inode = h->inode; inode ; inode = inode->i_hash_next)
+		if (inode->i_dev == sb->s_dev && inode->i_ino == nr)
+			goto found_it;
+	if (!empty) {
+		h->updating++;
+		empty = get_empty_inode();
+		if (!--h->updating)
+			wake_up(&update_wait);
 		if (empty)
-			iput(empty);
-		return inode;
-	}
-	if (!empty)
+			goto repeat;
 		return (NULL);
+	}
 	inode = empty;
 	inode->i_sb = sb;
 	inode->i_dev = sb->s_dev;
@@ -475,6 +455,31 @@ repeat:
 	put_last_free(inode);
 	insert_inode_hash(inode);
 	read_inode(inode);
+	goto return_it;
+
+found_it:
+	if (!inode->i_count)
+		nr_free_inodes--;
+	inode->i_count++;
+	wait_on_inode(inode);
+	if (inode->i_dev != sb->s_dev || inode->i_ino != nr) {
+		printk("Whee.. inode changed from under us. Tell Linus\n");
+		iput(inode);
+		goto repeat;
+	}
+	if (crossmntp && inode->i_mount) {
+		struct inode * tmp = inode->i_mount;
+		tmp->i_count++;
+		iput(inode);
+		inode = tmp;
+		wait_on_inode(inode);
+	}
+	if (empty)
+		iput(empty);
+
+return_it:
+	while (h->updating)
+		sleep_on(&update_wait);
 	return inode;
 }
 

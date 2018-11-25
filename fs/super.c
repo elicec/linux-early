@@ -10,6 +10,7 @@
 #include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
+#include <linux/major.h>
 #include <linux/stat.h>
 #include <linux/errno.h>
 #include <linux/string.h>
@@ -25,7 +26,8 @@
  */
 
 extern struct file_system_type file_systems[];
-extern struct file_operations * blkdev_fops[];
+extern struct file_operations * get_blkfops(unsigned int);
+extern struct file_operations * get_chrfops(unsigned int);
 
 extern void wait_for_keypress(void);
 extern void fcntl_init_locks(void);
@@ -34,7 +36,7 @@ extern int root_mountflags;
 
 struct super_block super_blocks[NR_SUPER];
 
-static int do_remount_sb(struct super_block *sb, int flags);
+static int do_remount_sb(struct super_block *sb, int flags, char * data);
 
 /* this is initialized in init/main.c */
 dev_t ROOT_DEV = 0;
@@ -176,7 +178,7 @@ static dev_t get_unnamed_dev(void)
 		memset(unnamed_dev_in_use, 0, sizeof(unnamed_dev_in_use));
 		unnamed_dev_in_use[0] = 1; /* minor 0 (nodev) is special */
 	}
-	for (i = 0; i < 256; i++) {
+	for (i = 0; i < sizeof unnamed_dev_in_use/sizeof unnamed_dev_in_use[0]; i++) {
 		if (!unnamed_dev_in_use[i]) {
 			unnamed_dev_in_use[i] = 1;
 			return (UNNAMED_MAJOR << 8) | i;
@@ -208,7 +210,8 @@ static int do_umount(dev_t dev)
 		if (!(sb=get_super(dev)))
 			return -ENOENT;
 		if (!(sb->s_flags & MS_RDONLY)) {
-			retval = do_remount_sb(sb, MS_RDONLY);
+			fsync_dev(dev);
+			retval = do_remount_sb(sb, MS_RDONLY, 0);
 			if (retval)
 				return retval;
 		}
@@ -217,11 +220,11 @@ static int do_umount(dev_t dev)
 	if (!(sb=get_super(dev)) || !(sb->s_covered))
 		return -ENOENT;
 	if (!sb->s_covered->i_mount)
-		printk("VFS: umount(%d/%d): mounted inode has i_mount=0\n",
+		printk("VFS: umount(%d/%d): mounted inode has i_mount=NULL\n",
 							MAJOR(dev), MINOR(dev));
 	if (!fs_may_umount(dev, sb->s_mounted))
 		return -EBUSY;
-	sb->s_covered->i_mount=0;
+	sb->s_covered->i_mount = NULL;
 	iput(sb->s_covered);
 	sb->s_covered = NULL;
 	iput(sb->s_mounted);
@@ -243,7 +246,7 @@ static int do_umount(dev_t dev)
  * functions, they should be faked here.  -- jrs
  */
 
-extern "C" int sys_umount(char * name)
+asmlinkage int sys_umount(char * name)
 {
 	struct inode * inode;
 	dev_t dev;
@@ -254,15 +257,18 @@ extern "C" int sys_umount(char * name)
 	if (!suser())
 		return -EPERM;
 	retval = namei(name,&inode);
-	if (retval)
-		return retval;
+	if (retval) {
+		retval = lnamei(name,&inode);
+		if (retval)
+			return retval;
+	}
 	if (S_ISBLK(inode->i_mode)) {
 		dev = inode->i_rdev;
 		if (IS_NODEV(inode)) {
 			iput(inode);
 			return -EACCES;
 		}
-	} else if (S_ISDIR(inode->i_mode)) {
+	} else {
 		if (!inode || !inode->i_sb || inode != inode->i_sb->s_mounted) {
 			iput(inode);
 			return -EINVAL;
@@ -272,16 +278,13 @@ extern "C" int sys_umount(char * name)
 		memset(&dummy_inode, 0, sizeof(dummy_inode));
 		dummy_inode.i_rdev = dev;
 		inode = &dummy_inode;
-	} else {
-		iput(inode);
-		return -EINVAL;
 	}
 	if (MAJOR(dev) >= MAX_BLKDEV) {
 		iput(inode);
 		return -ENXIO;
 	}
 	if (!(retval = do_umount(dev)) && dev != ROOT_DEV) {
-		fops = blkdev_fops[MAJOR(dev)];
+		fops = get_blkfops(MAJOR(dev));
 		if (fops && fops->release)
 			fops->release(inode,NULL);
 		if (MAJOR(dev) == UNNAMED_MAJOR)
@@ -331,7 +334,7 @@ static int do_mount(dev_t dev, const char * dir, char * type, int flags, void * 
 		return -EBUSY;
 	}
 	sb->s_covered = dir_i;
-	dir_i->i_mount = 1;
+	dir_i->i_mount = sb->s_mounted;
 	return 0;		/* we don't iput(dir_i) - see umount */
 }
 
@@ -342,7 +345,7 @@ static int do_mount(dev_t dev, const char * dir, char * type, int flags, void * 
  * FS-specific mount options can't be altered by remounting.
  */
 
-static int do_remount_sb(struct super_block *sb, int flags)
+static int do_remount_sb(struct super_block *sb, int flags, char *data)
 {
 	int retval;
 	
@@ -351,7 +354,7 @@ static int do_remount_sb(struct super_block *sb, int flags)
 		if (!fs_may_remount_ro(sb->s_dev))
 			return -EBUSY;
 	if (sb->s_op && sb->s_op->remount_fs) {
-		retval = sb->s_op->remount_fs(sb, &flags);
+		retval = sb->s_op->remount_fs(sb, &flags, data);
 		if (retval)
 			return retval;
 	}
@@ -360,7 +363,7 @@ static int do_remount_sb(struct super_block *sb, int flags)
 	return 0;
 }
 
-static int do_remount(const char *dir,int flags)
+static int do_remount(const char *dir,int flags,char *data)
 {
 	struct inode *dir_i;
 	int retval;
@@ -372,25 +375,56 @@ static int do_remount(const char *dir,int flags)
 		iput(dir_i);
 		return -EINVAL;
 	}
-	retval = do_remount_sb(dir_i->i_sb, flags);
+	retval = do_remount_sb(dir_i->i_sb, flags, data);
 	iput(dir_i);
 	return retval;
 }
 
+static int copy_mount_options (const void * data, unsigned long *where)
+{
+	int i;
+	unsigned long page;
+	struct vm_area_struct * vma;
+
+	*where = 0;
+	if (!data)
+		return 0;
+
+	for (vma = current->mmap ; ; ) {
+		if (!vma ||
+		    (unsigned long) data < vma->vm_start) {
+			return -EFAULT;
+		}
+		if ((unsigned long) data < vma->vm_end)
+			break;
+		vma = vma->vm_next;
+	}
+	i = vma->vm_end - (unsigned long) data;
+	if (PAGE_SIZE <= (unsigned long) i)
+		i = PAGE_SIZE-1;
+	if (!(page = __get_free_page(GFP_KERNEL))) {
+		return -ENOMEM;
+	}
+	memcpy_fromfs((void *) page,data,i);
+	*where = page;
+	return 0;
+}
 
 /*
  * Flags is a 16-bit value that allows up to 16 non-fs dependent flags to
  * be given to the mount() call (ie: read-only, no-dev, no-suid etc).
  *
- * data is a (void *) that can point to any structure up to 4095 bytes, which
- * can contain arbitrary fs-dependent information (or be NULL).
+ * data is a (void *) that can point to any structure up to
+ * PAGE_SIZE-1 bytes, which can contain arbitrary fs-dependent
+ * information (or be NULL).
  *
- * NOTE! As old versions of mount() didn't use this setup, the flags has to have
- * a special 16-bit magic number in the hight word: 0xC0ED. If this magic word
- * isn't present, the flags and data info isn't used, as the syscall assumes we
- * are talking to an older version that didn't understand them.
+ * NOTE! As old versions of mount() didn't use this setup, the flags
+ * has to have a special 16-bit magic number in the hight word:
+ * 0xC0ED. If this magic word isn't present, the flags and data info
+ * isn't used, as the syscall assumes we are talking to an older
+ * version that didn't understand them.
  */
-extern "C" int sys_mount(char * dev_name, char * dir_name, char * type,
+asmlinkage int sys_mount(char * dev_name, char * dir_name, char * type,
 	unsigned long new_flags, void * data)
 {
 	struct file_system_type * fstype;
@@ -398,27 +432,29 @@ extern "C" int sys_mount(char * dev_name, char * dir_name, char * type,
 	struct file_operations * fops;
 	dev_t dev;
 	int retval;
-	char tmp[100], * t;
-	int i;
+	char * t;
 	unsigned long flags = 0;
 	unsigned long page = 0;
 
 	if (!suser())
 		return -EPERM;
-	if ((new_flags & (MS_MGC_MSK | MS_REMOUNT)) == (MS_MGC_VAL | MS_REMOUNT)) {
-		return do_remount(dir_name,new_flags & ~MS_MGC_MSK & ~MS_REMOUNT);
+	if ((new_flags &
+	     (MS_MGC_MSK | MS_REMOUNT)) == (MS_MGC_VAL | MS_REMOUNT)) {
+		retval = copy_mount_options (data, &page);
+		if (retval < 0)
+			return retval;
+		retval = do_remount(dir_name,
+				    new_flags & ~MS_MGC_MSK & ~MS_REMOUNT,
+				    (char *) page);
+		free_page(page);
+		return retval;
 	}
-	if (type) {
-		for (i = 0 ; i < 100 ; i++) {
-			if (TASK_SIZE <= (unsigned long) type)
-				return -EFAULT;
-			if (!(tmp[i] = get_fs_byte(type++)))
-				break;
-		}
-		t = tmp;
-	} else
-		t = NULL;
-	if (!(fstype = get_fs_type(t)))
+	retval = copy_mount_options (type, &page);
+	if (retval < 0)
+		return retval;
+	fstype = get_fs_type((char *) page);
+	free_page(page);
+	if (!fstype)		
 		return -ENODEV;
 	t = fstype->name;
 	if (fstype->requires_dev) {
@@ -443,7 +479,7 @@ extern "C" int sys_mount(char * dev_name, char * dir_name, char * type,
 			return -EMFILE;
 		inode = NULL;
 	}
-	fops = blkdev_fops[MAJOR(dev)];
+	fops = get_blkfops(MAJOR(dev));
 	if (fops && fops->open) {
 		retval = fops->open(inode,NULL);
 		if (retval) {
@@ -451,18 +487,13 @@ extern "C" int sys_mount(char * dev_name, char * dir_name, char * type,
 			return retval;
 		}
 	}
+	page = 0;
 	if ((new_flags & MS_MGC_MSK) == MS_MGC_VAL) {
 		flags = new_flags & ~MS_MGC_MSK;
-		if (data) {
-			if ((unsigned long) data >= TASK_SIZE) {
-				iput(inode);
-				return -EFAULT;
-			}
-			page = get_free_page(GFP_KERNEL);
-			i = TASK_SIZE - (unsigned long) data;
-			if (i < 0 || i > 4095)
-				i = 4095;
-			memcpy_fromfs((void *) page,data,i);
+		retval = copy_mount_options(data, &page);
+		if (retval < 0) {
+			iput(inode);
+			return retval;
 		}
 	}
 	retval = do_mount(dev,dir_name,t,flags,(void *) page);
@@ -481,8 +512,8 @@ void mount_root(void)
 
 	memset(super_blocks, 0, sizeof(super_blocks));
 	fcntl_init_locks();
-	if (MAJOR(ROOT_DEV) == 2) {
-		printk("VFS: Insert root floppy and press ENTER");
+	if (MAJOR(ROOT_DEV) == FLOPPY_MAJOR) {
+		printk(KERN_NOTICE "VFS: Insert root floppy and press ENTER\n");
 		wait_for_keypress();
 	}
 	for (fs_type = file_systems; fs_type->read_super; fs_type++) {

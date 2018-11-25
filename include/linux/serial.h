@@ -15,12 +15,15 @@
  *
  * For definitions of the flags field, see tty.h
  */
+#ifndef _LINUX_SERIAL_H
+#define _LINUX_SERIAL_H
 
 struct async_struct {
 	int			baud_base;
 	int			port;
 	int			irq;
 	int			flags; 		/* defined in tty.h */
+	int			hub6;		/* HUB6 plus one */
 	int			type; 		/* UART type */
 	struct tty_struct 	*tty;
 	int			read_status_mask;
@@ -29,11 +32,18 @@ struct async_struct {
 	int			custom_divisor;
 	int			x_char;	/* xon/xoff characater */
 	int			close_delay;
+	int			IER; 	/* Interrupt Enable Register */
 	int			event;
 	int			line;
 	int			count;	    /* # of fd on device */
 	int			blocked_open; /* # of blocked opens */
-	struct wait_queue *open_wait;
+	long			session; /* Session of opening process */
+	long			pgrp; /* pgrp of opening process */
+	struct termios		normal_termios;
+	struct termios		callout_termios;
+	struct wait_queue	*open_wait;
+	struct wait_queue	*close_wait;
+	struct wait_queue	*xmit_wait;
 	struct async_struct	*next_port; /* For the linked list */
 	struct async_struct	*prev_port;
 };
@@ -79,9 +89,6 @@ struct async_struct {
 #define UART_FCR_TRIGGER_8	0x80 /* Mask for trigger set at 8 */
 #define UART_FCR_TRIGGER_14	0xC0 /* Mask for trigger set at 14 */
 
-#define UART_FCR_CLEAR_CMD	(UART_FCR_CLEAR_RCVR | UART_FCR_CLEAR_XMIT)
-#define UART_FCR_SETUP_CMD	(UART_FCR_ENABLE_FIFO | UART_FCR_TRIGGER_8)
-	
 /*
  * These are the definitions for the Line Control Register
  * 
@@ -150,3 +157,5 @@ struct async_struct {
 #define UART_MSR_DDSR	0x02	/* Delta DSR */
 #define UART_MSR_DCTS	0x01	/* Delta CTS */
 #define UART_MSR_ANY_DELTA 0x0F	/* Any of the delta bits! */
+
+#endif /* _LINUX_SERIAL_H */

@@ -7,7 +7,7 @@
 #
 # Note 2! The CFLAGS definitions are now in the main makefile...
 
-SUBDIRS = minix ext ext2 msdos proc isofs nfs xiafs
+SUBDIRS = minix ext ext2 msdos proc isofs nfs xiafs hpfs sysv
 
 ifdef CONFIG_MINIX_FS
 FS_SUBDIRS := $(FS_SUBDIRS) minix
@@ -33,7 +33,19 @@ endif
 ifdef CONFIG_XIA_FS
 FS_SUBDIRS := $(FS_SUBDIRS) xiafs
 endif
+ifdef CONFIG_SYSV_FS
+FS_SUBDIRS := $(FS_SUBDIRS) sysv
+endif
+ifdef CONFIG_HPFS_FS
+FS_SUBDIRS := $(FS_SUBDIRS) hpfs
+endif
 
+ifdef CONFIG_BINFMT_ELF
+BINFMTS := $(BINFMTS) binfmt_elf.o
+endif
+ifdef CONFIG_BINFMT_COFF
+BINFMTS := $(BINFMTS) binfmt_coff.o
+endif
 
 .c.s:
 	$(CC) $(CFLAGS) -S $<
@@ -44,7 +56,7 @@ endif
 
 OBJS=	open.o read_write.o inode.o devices.o file_table.o buffer.o super.o \
 	block_dev.o stat.o exec.o pipe.o namei.o fcntl.o ioctl.o \
-	select.o fifo.o locks.o filesystems.o
+	select.o fifo.o locks.o filesystems.o $(BINFMTS)
 
 all: fs.o filesystems.a
 
@@ -53,17 +65,14 @@ fs.o: $(OBJS)
 
 filesystems.a: dummy
 	rm -f filesystems.a
-	@for i in $(FS_SUBDIRS); do [ ! -d $$i ] || \
-	(cd $$i && echo $$i && $(MAKE) && $(AR) rcs ../filesystems.a $$i.o) \
-	|| exit; done
-
-clean:
-	rm -f core *.s *.o *.a
-	for i in $(SUBDIRS); do ([ -d $$i ] && cd $$i && $(MAKE) clean); done
+	set -e; for i in $(FS_SUBDIRS); do \
+	  test ! -d $$i || \
+	    { $(MAKE) -C $$i; $(AR) rcs filesystems.a $$i/$$i.o; }; done
 
 depend dep:
 	$(CPP) -M *.c > .depend
-	for i in $(SUBDIRS); do [ ! -d $$i ] || (cd $$i && $(MAKE) dep) || exit; done
+	set -e; for i in $(SUBDIRS); do \
+	  test ! -d $$i || $(MAKE) -C $$i dep; done
 
 dummy:
 

@@ -6,7 +6,7 @@
 
 /*
  *  'buffer.c' implements the buffer-cache functions. Race-conditions have
- * been avoided by NEVER letting a interrupt change a buffer (except for the
+ * been avoided by NEVER letting an interrupt change a buffer (except for the
  * data, of course), but instead letting the caller do it.
  */
 
@@ -22,6 +22,7 @@
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
+#include <linux/major.h>
 #include <linux/string.h>
 #include <linux/locks.h>
 #include <linux/errno.h>
@@ -38,6 +39,14 @@ extern int check_scsidisk_media_change(int, int);
 extern int revalidate_scsidisk(int, int);
 #endif
 #endif
+#ifdef CONFIG_CDU31A
+extern int check_cdu31a_media_change(int, int);
+#endif
+#ifdef CONFIG_MCD
+extern int check_mcd_media_change(int, int);
+#endif
+
+static int grow_buffers(int pri, int size);
 
 static struct buffer_head * hash_table[NR_HASH];
 static struct buffer_head * free_list = NULL;
@@ -154,7 +163,7 @@ int fsync_dev(dev_t dev)
 	return sync_buffers(dev, 1);
 }
 
-extern "C" int sys_sync(void)
+asmlinkage int sys_sync(void)
 {
 	sync_dev(0);
 	return 0;
@@ -165,7 +174,7 @@ int file_fsync (struct inode *inode, struct file *filp)
 	return fsync_dev(inode->i_dev);
 }
 
-extern "C" int sys_fsync(unsigned int fd)
+asmlinkage int sys_fsync(unsigned int fd)
 {
 	struct file * file;
 	struct inode * inode;
@@ -214,7 +223,7 @@ void check_disk_change(dev_t dev)
 	struct buffer_head * bh;
 
 	switch(MAJOR(dev)){
-	case 2: /* floppy disc */
+	case FLOPPY_MAJOR:
 		if (!(bh = getblk(dev,0,1024)))
 			return;
 		i = floppy_change(bh);
@@ -222,14 +231,26 @@ void check_disk_change(dev_t dev)
 		break;
 
 #if defined(CONFIG_BLK_DEV_SD) && defined(CONFIG_SCSI)
-         case 8: /* Removable scsi disk */
+         case SCSI_DISK_MAJOR:
 		i = check_scsidisk_media_change(dev, 0);
 		break;
 #endif
 
 #if defined(CONFIG_BLK_DEV_SR) && defined(CONFIG_SCSI)
-         case 11: /* CDROM */
+	 case SCSI_CDROM_MAJOR:
 		i = check_cdrom_media_change(dev, 0);
+		break;
+#endif
+
+#if defined(CONFIG_CDU31A)
+         case CDU31A_CDROM_MAJOR:
+		i = check_cdu31a_media_change(dev, 0);
+		break;
+#endif
+
+#if defined(CONFIG_MCD)
+         case MITSUMI_CDROM_MAJOR:
+		i = check_mcd_media_change(dev, 0);
 		break;
 #endif
 
@@ -250,7 +271,7 @@ void check_disk_change(dev_t dev)
 #if defined(CONFIG_BLK_DEV_SD) && defined(CONFIG_SCSI)
 /* This is trickier for a removable hardisk, because we have to invalidate
    all of the partitions that lie on the disk. */
-	if (MAJOR(dev) == 8)
+	if (MAJOR(dev) == SCSI_DISK_MAJOR)
 		revalidate_scsidisk(dev, 0);
 #endif
 }
@@ -379,13 +400,15 @@ void set_blocksize(dev_t dev, int size)
 	if (!blksize_size[MAJOR(dev)])
 		return;
 
-	if (size != 512 && size != 1024 && size != 2048 &&  size != 4096) 
-		panic("Invalid blocksize passed to set_blocksize");
+	switch(size) {
+		default: panic("Invalid blocksize passed to set_blocksize");
+		case 512: case 1024: case 2048: case 4096:;
+	}
 
 	if (blksize_size[MAJOR(dev)][MINOR(dev)] == 0 && size == BLOCK_SIZE) {
 		blksize_size[MAJOR(dev)][MINOR(dev)] = size;
 		return;
-	};
+	}
 	if (blksize_size[MAJOR(dev)][MINOR(dev)] == size)
 		return;
 	sync_buffers(dev, 2);
@@ -436,8 +459,8 @@ repeat:
 	}
 	grow_size -= size;
 	if (nr_free_pages > min_free_pages && grow_size <= 0) {
-		grow_buffers(size);
-		grow_size = 4096;
+		if (grow_buffers(GFP_BUFFER, size))
+			grow_size = PAGE_SIZE;
 	}
 	buffers = nr_buffers;
 	bh = NULL;
@@ -461,16 +484,15 @@ repeat:
 #endif
 	}
 
-	if (!bh && nr_free_pages > 5) {
-		grow_buffers(size);
-		goto repeat;
-	}
-	
-/* and repeat until we find something good */
 	if (!bh) {
-		sleep_on(&buffer_wait);
+		if (nr_free_pages > 5)
+			if (grow_buffers(GFP_BUFFER, size))
+				goto repeat;
+		if (!grow_buffers(GFP_ATOMIC, size))
+			sleep_on(&buffer_wait);
 		goto repeat;
 	}
+
 	wait_on_buffer(bh);
 	if (bh->b_count || bh->b_size != size)
 		goto repeat;
@@ -482,7 +504,7 @@ repeat:
 /* already have added "this" block to the cache. check it */
 	if (find_buffer(dev,block,size))
 		goto repeat;
-/* OK, FINALLY we know that this buffer is the only one of it's kind, */
+/* OK, FINALLY we know that this buffer is the only one of its kind, */
 /* and that it's unused (b_count=0), unlocked (b_lock=0), and clean */
 	bh->b_count=1;
 	bh->b_dirt=0;
@@ -588,19 +610,18 @@ static void put_unused_buffer_head(struct buffer_head * bh)
 
 static void get_more_buffer_heads(void)
 {
-	unsigned long page;
+	int i;
 	struct buffer_head * bh;
 
 	if (unused_list)
 		return;
-	page = get_free_page(GFP_BUFFER);
-	if (!page)
+
+	if(! (bh = (struct buffer_head*) get_free_page(GFP_BUFFER)))
 		return;
-	bh = (struct buffer_head *) page;
-	while ((unsigned long) (bh+1) <= page+4096) {
-		put_unused_buffer_head(bh);
-		bh++;
-		nr_buffer_heads++;
+
+	for (nr_buffer_heads+=i=PAGE_SIZE/sizeof*bh ; i>0; i--) {
+		bh->b_next_free = unused_list;	/* only make link */
+		unused_list = bh++;
 	}
 }
 
@@ -632,8 +653,8 @@ static struct buffer_head * create_buffers(unsigned long page, unsigned long siz
 	unsigned long offset;
 
 	head = NULL;
-	offset = 4096;
-	while ((offset -= size) < 4096) {
+	offset = PAGE_SIZE;
+	while ((offset -= size) < PAGE_SIZE) {
 		bh = get_unused_buffer_head();
 		if (!bh)
 			goto no_grow;
@@ -685,14 +706,14 @@ static unsigned long check_aligned(struct buffer_head * first, unsigned long add
 	int nrbuf;
 
 	page = (unsigned long) first->b_data;
-	if (page & 0xfff) {
+	if (page & ~PAGE_MASK) {
 		brelse(first);
 		return 0;
 	}
 	mem_map[MAP_NR(page)]++;
 	bh[0] = first;
 	nrbuf = 1;
-	for (offset = size ; offset < 4096 ; offset += size) {
+	for (offset = size ; offset < PAGE_SIZE ; offset += size) {
 		block = *++b;
 		if (!block)
 			goto no_go;
@@ -727,16 +748,14 @@ static unsigned long try_to_load_aligned(unsigned long address,
 	bh = create_buffers(address, size);
 	if (!bh)
 		return 0;
+	/* do any of the buffers already exist? punt if so.. */
 	p = b;
-	for (offset = 0 ; offset < 4096 ; offset += size) {
+	for (offset = 0 ; offset < PAGE_SIZE ; offset += size) {
 		block = *(p++);
 		if (!block)
 			goto not_aligned;
-		tmp = get_hash_table(dev, block, size);
-		if (tmp) {
-			brelse(tmp);
+		if (find_buffer(dev, block, size))
 			goto not_aligned;
-		}
 	}
 	tmp = bh;
 	p = b;
@@ -755,7 +774,7 @@ static unsigned long try_to_load_aligned(unsigned long address,
 		else
 			break;
 	}
-	buffermem += 4096;
+	buffermem += PAGE_SIZE;
 	bh->b_this_page = tmp;
 	mem_map[MAP_NR(address)]++;
 	read_buffers(arr,block);
@@ -826,7 +845,7 @@ unsigned long bread_page(unsigned long address, dev_t dev, int b[], int size, in
 		if (b[i])
 			bh[i] = getblk(dev, b[i], size);
 	}
-	read_buffers(bh,4);
+	read_buffers(bh,i);
 	where = address;
  	for (i=0, j=0; j<PAGE_SIZE ; i++, j += size,address += size) {
 		if (bh[i]) {
@@ -842,22 +861,21 @@ unsigned long bread_page(unsigned long address, dev_t dev, int b[], int size, in
  * Try to increase the number of buffers available: the size argument
  * is used to determine what kind of buffers we want.
  */
-void grow_buffers(int size)
+static int grow_buffers(int pri, int size)
 {
 	unsigned long page;
 	struct buffer_head *bh, *tmp;
 
-	if ((size & 511) || (size > 4096)) {
+	if ((size & 511) || (size > PAGE_SIZE)) {
 		printk("VFS: grow_buffers: size = %d\n",size);
-		return;
+		return 0;
 	}
-	page = get_free_page(GFP_BUFFER);
-	if (!page)
-		return;
+	if(!(page = __get_free_page(pri)))
+		return 0;
 	bh = create_buffers(page, size);
 	if (!bh) {
 		free_page(page);
-		return;
+		return 0;
 	}
 	tmp = bh;
 	while (1) {
@@ -878,8 +896,8 @@ void grow_buffers(int size)
 			break;
 	}
 	tmp->b_this_page = bh;
-	buffermem += 4096;
-	return;
+	buffermem += PAGE_SIZE;
+	return 1;
 }
 
 /*
@@ -893,12 +911,12 @@ static int try_to_free(struct buffer_head * bh, struct buffer_head ** bhp)
 
 	*bhp = bh;
 	page = (unsigned long) bh->b_data;
-	page &= 0xfffff000;
+	page &= PAGE_MASK;
 	tmp = bh;
 	do {
 		if (!tmp)
 			return 0;
-		if (tmp->b_count || tmp->b_dirt || tmp->b_lock)
+		if (tmp->b_count || tmp->b_dirt || tmp->b_lock || tmp->b_wait)
 			return 0;
 		tmp = tmp->b_this_page;
 	} while (tmp != bh);
@@ -912,7 +930,7 @@ static int try_to_free(struct buffer_head * bh, struct buffer_head ** bhp)
 		remove_from_queues(p);
 		put_unused_buffer_head(p);
 	} while (tmp != bh);
-	buffermem -= 4096;
+	buffermem -= PAGE_SIZE;
 	free_page(page);
 	return !mem_map[MAP_NR(page)];
 }
@@ -934,7 +952,13 @@ int shrink_buffers(unsigned int priority)
 	bh = free_list;
 	i = nr_buffers >> priority;
 	for ( ; i-- > 0 ; bh = bh->b_next_free) {
-		if (bh->b_count || !bh->b_this_page)
+		if (bh->b_count ||
+		    (priority >= 5 &&
+		     mem_map[MAP_NR((unsigned long) bh->b_data)] > 1)) {
+			put_last_free(bh);
+			continue;
+		}
+		if (!bh->b_this_page)
 			continue;
 		if (bh->b_lock)
 			if (priority)
@@ -951,6 +975,29 @@ int shrink_buffers(unsigned int priority)
 			return 1;
 	}
 	return 0;
+}
+
+void show_buffers(void)
+{
+	struct buffer_head * bh;
+	int found = 0, locked = 0, dirty = 0, used = 0, lastused = 0;
+
+	printk("Buffer memory:   %6dkB\n",buffermem>>10);
+	printk("Buffer heads:    %6d\n",nr_buffer_heads);
+	printk("Buffer blocks:   %6d\n",nr_buffers);
+	bh = free_list;
+	do {
+		found++;
+		if (bh->b_lock)
+			locked++;
+		if (bh->b_dirt)
+			dirty++;
+		if (bh->b_count)
+			used++, lastused = found;
+		bh = bh->b_next_free;
+	} while (bh != free_list);
+	printk("Buffer mem: %d buffers, %d used (last=%d), %d locked, %d dirty\n",
+		found, used, lastused, locked, dirty);
 }
 
 /*
@@ -971,7 +1018,7 @@ void buffer_init(void)
 	for (i = 0 ; i < NR_HASH ; i++)
 		hash_table[i] = NULL;
 	free_list = 0;
-	grow_buffers(BLOCK_SIZE);
+	grow_buffers(GFP_KERNEL, BLOCK_SIZE);
 	if (!free_list)
 		panic("VFS: Unable to initialize buffer free list!");
 	return;

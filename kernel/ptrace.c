@@ -8,9 +8,11 @@
 #include <linux/mm.h>
 #include <linux/errno.h>
 #include <linux/ptrace.h>
+#include <linux/user.h>
 
 #include <asm/segment.h>
 #include <asm/system.h>
+#include <linux/debugreg.h>
 
 /*
  * does not yet catch signals sent when the child dies.
@@ -19,7 +21,7 @@
 
 /* determines which flags the user has access to. */
 /* 1 = access 0 = no access */
-#define FLAG_MASK 0x00000dd9
+#define FLAG_MASK 0x00044dd5
 
 /* set's the trap flag. */
 #define TRAP_FLAG 0x100
@@ -89,19 +91,21 @@ static unsigned long get_long(struct task_struct * tsk,
 	unsigned long page;
 
 repeat:
-	page = tsk->tss.cr3 + ((addr >> 20) & 0xffc);
-	page = *(unsigned long *) page;
+	page = *PAGE_DIR_OFFSET(tsk->tss.cr3,addr);
 	if (page & PAGE_PRESENT) {
-		page &= 0xfffff000;
-		page += (addr >> 10) & 0xffc;
+		page &= PAGE_MASK;
+		page += PAGE_PTR(addr);
 		page = *((unsigned long *) page);
 	}
 	if (!(page & PAGE_PRESENT)) {
 		do_no_page(0,addr,tsk,0);
 		goto repeat;
 	}
-	page &= 0xfffff000;
-	page += addr & 0xfff;
+/* this is a hack for non-kernel-mapped video buffers and similar */
+	if (page >= high_memory)
+		return 0;
+	page &= PAGE_MASK;
+	page += addr & ~PAGE_MASK;
 	return *(unsigned long *) page;
 }
 
@@ -110,34 +114,46 @@ repeat:
  * tables. NOTE! You should check that the long isn't on a page boundary,
  * and that it is in the task area before calling this: this routine does
  * no checking.
+ *
+ * Now keeps R/W state of page so that a text page stays readonly
+ * even if a debugger scribbles breakpoints into it.  -M.U-
  */
 static void put_long(struct task_struct * tsk, unsigned long addr,
 	unsigned long data)
 {
-	unsigned long page, pte;
+	unsigned long page, pte = 0;
+	int readonly = 0;
 
 repeat:
-	page = tsk->tss.cr3 + ((addr >> 20) & 0xffc);
-	page = *(unsigned long *) page;
+	page = *PAGE_DIR_OFFSET(tsk->tss.cr3,addr);
 	if (page & PAGE_PRESENT) {
-		page &= 0xfffff000;
-		page += (addr >> 10) & 0xffc;
+		page &= PAGE_MASK;
+		page += PAGE_PTR(addr);
 		pte = page;
 		page = *((unsigned long *) page);
 	}
 	if (!(page & PAGE_PRESENT)) {
-		do_no_page(PAGE_RW,addr,tsk,0);
+		do_no_page(0 /* PAGE_RW */ ,addr,tsk,0);
 		goto repeat;
 	}
 	if (!(page & PAGE_RW)) {
+		if(!(page & PAGE_COW))
+			readonly = 1;
 		do_wp_page(PAGE_RW | PAGE_PRESENT,addr,tsk,0);
 		goto repeat;
 	}
+/* this is a hack for non-kernel-mapped video buffers and similar */
+	if (page >= high_memory)
+		return;
 /* we're bypassing pagetables, so we have to set the dirty bit ourselves */
 	*(unsigned long *) pte |= (PAGE_DIRTY|PAGE_COW);
-	page &= 0xfffff000;
-	page += addr & 0xfff;
+	page &= PAGE_MASK;
+	page += addr & ~PAGE_MASK;
 	*(unsigned long *) page = data;
+	if(readonly) {
+		*(unsigned long *) pte &=~ (PAGE_RW|PAGE_COW);
+		invalidate();
+	} 
 }
 
 /*
@@ -149,12 +165,12 @@ static int read_long(struct task_struct * tsk, unsigned long addr,
 {
 	unsigned long low,high;
 
-	if (addr > TASK_SIZE-4)
+	if (addr > TASK_SIZE-sizeof(long))
 		return -EIO;
-	if ((addr & 0xfff) > PAGE_SIZE-4) {
-		low = get_long(tsk,addr & 0xfffffffc);
-		high = get_long(tsk,(addr+4) & 0xfffffffc);
-		switch (addr & 3) {
+	if ((addr & ~PAGE_MASK) > PAGE_SIZE-sizeof(long)) {
+		low = get_long(tsk,addr & ~(sizeof(long)-1));
+		high = get_long(tsk,(addr+sizeof(long)) & ~(sizeof(long)-1));
+		switch (addr & (sizeof(long)-1)) {
 			case 1:
 				low >>= 8;
 				low |= high << 24;
@@ -183,44 +199,48 @@ static int write_long(struct task_struct * tsk, unsigned long addr,
 {
 	unsigned long low,high;
 
-	if (addr > TASK_SIZE-4)
+	if (addr > TASK_SIZE-sizeof(long))
 		return -EIO;
-	if ((addr & 0xfff) > PAGE_SIZE-4) {
-		low = get_long(tsk,addr & 0xfffffffc);
-		high = get_long(tsk,(addr+4) & 0xfffffffc);
-		switch (addr & 3) {
+	if ((addr & ~PAGE_MASK) > PAGE_SIZE-sizeof(long)) {
+		low = get_long(tsk,addr & ~(sizeof(long)-1));
+		high = get_long(tsk,(addr+sizeof(long)) & ~(sizeof(long)-1));
+		switch (addr & (sizeof(long)-1)) {
 			case 0: /* shouldn't happen, but safety first */
 				low = data;
 				break;
 			case 1:
 				low &= 0x000000ff;
 				low |= data << 8;
-				high &= 0xffffff00;
+				high &= ~0xff;
 				high |= data >> 24;
 				break;
 			case 2:
 				low &= 0x0000ffff;
 				low |= data << 16;
-				high &= 0xffff0000;
+				high &= ~0xffff;
 				high |= data >> 16;
 				break;
 			case 3:
 				low &= 0x00ffffff;
 				low |= data << 24;
-				high &= 0xff000000;
+				high &= ~0xffffff;
 				high |= data >> 8;
 				break;
 		}
-		put_long(tsk,addr & 0xfffffffc,low);
-		put_long(tsk,(addr+4) & 0xfffffffc,high);
+		put_long(tsk,addr & ~(sizeof(long)-1),low);
+		put_long(tsk,(addr+sizeof(long)) & ~(sizeof(long)-1),high);
 	} else
 		put_long(tsk,addr,data);
 	return 0;
 }
 
-extern "C" int sys_ptrace(long request, long pid, long addr, long data)
+asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 {
 	struct task_struct *child;
+	struct user * dummy;
+	int i;
+
+	dummy = NULL;
 
 	if (request == PTRACE_TRACEME) {
 		/* are we already being traced? */
@@ -254,8 +274,10 @@ extern "C" int sys_ptrace(long request, long pid, long addr, long data)
 	}
 	if (!(child->flags & PF_PTRACED))
 		return -ESRCH;
-	if (child->state != TASK_STOPPED && request != PTRACE_DETACH)
-		return -ESRCH;
+	if (child->state != TASK_STOPPED) {
+		if (request != PTRACE_KILL)
+			return -ESRCH;
+	}
 	if (child->p_pptr != current)
 		return -ESRCH;
 
@@ -269,7 +291,7 @@ extern "C" int sys_ptrace(long request, long pid, long addr, long data)
 			res = read_long(child, addr, &tmp);
 			if (res < 0)
 				return res;
-			res = verify_area(VERIFY_WRITE, (void *) data, 4);
+			res = verify_area(VERIFY_WRITE, (void *) data, sizeof(long));
 			if (!res)
 				put_fs_long(tmp,(unsigned long *) data);
 			return res;
@@ -280,13 +302,29 @@ extern "C" int sys_ptrace(long request, long pid, long addr, long data)
 			unsigned long tmp;
 			int res;
 
-			addr = addr >> 2; /* temporary hack. */
-			if (addr < 0 || addr >= 17)
+			if ((addr & 3) || addr < 0 || 
+			    addr > sizeof(struct user) - 3)
 				return -EIO;
-			res = verify_area(VERIFY_WRITE, (void *) data, 4);
+
+			res = verify_area(VERIFY_WRITE, (void *) data, sizeof(long));
 			if (res)
 				return res;
-			tmp = get_stack_long(child, 4*addr - MAGICNUMBER);
+			tmp = 0;  /* Default return condition */
+			if(addr < 17*sizeof(long)) {
+			  addr = addr >> 2; /* temporary hack. */
+
+			  tmp = get_stack_long(child, sizeof(long)*addr - MAGICNUMBER);
+			  if (addr == DS || addr == ES ||
+			      addr == FS || addr == GS ||
+			      addr == CS || addr == SS)
+			    tmp &= 0xffff;
+			};
+			if(addr >= (long) &dummy->u_debugreg[0] &&
+			   addr <= (long) &dummy->u_debugreg[7]){
+				addr -= (long) &dummy->u_debugreg[0];
+				addr = addr >> 2;
+				tmp = child->debugreg[addr];
+			};
 			put_fs_long(tmp,(unsigned long *) data);
 			return 0;
 		}
@@ -297,18 +335,60 @@ extern "C" int sys_ptrace(long request, long pid, long addr, long data)
 			return write_long(child,addr,data);
 
 		case PTRACE_POKEUSR: /* write the word at location addr in the USER area */
-			addr = addr >> 2; /* temproary hack. */
-			if (addr < 0 || addr >= 17)
+			if ((addr & 3) || addr < 0 || 
+			    addr > sizeof(struct user) - 3)
 				return -EIO;
+
+			addr = addr >> 2; /* temproary hack. */
+
 			if (addr == ORIG_EAX)
 				return -EIO;
+			if (addr == DS || addr == ES ||
+			    addr == FS || addr == GS ||
+			    addr == CS || addr == SS) {
+			    	data &= 0xffff;
+			    	if (data && (data & 3) != 3)
+					return -EIO;
+			}
 			if (addr == EFL) {   /* flags. */
 				data &= FLAG_MASK;
-				data |= get_stack_long(child, EFL*4-MAGICNUMBER)  & ~FLAG_MASK;
+				data |= get_stack_long(child, EFL*sizeof(long)-MAGICNUMBER)  & ~FLAG_MASK;
 			}
-			if (put_stack_long(child, 4*addr-MAGICNUMBER, data))
+		  /* Do not allow the user to set the debug register for kernel
+		     address space */
+		  if(addr < 17){
+			  if (put_stack_long(child, sizeof(long)*addr-MAGICNUMBER, data))
 				return -EIO;
 			return 0;
+			};
+
+		  /* We need to be very careful here.  We implicitly
+		     want to modify a portion of the task_struct, and we
+		     have to be selective about what portions we allow someone
+		     to modify. */
+
+		  addr = addr << 2;  /* Convert back again */
+		  if(addr >= (long) &dummy->u_debugreg[0] &&
+		     addr <= (long) &dummy->u_debugreg[7]){
+
+			  if(addr == (long) &dummy->u_debugreg[4]) return -EIO;
+			  if(addr == (long) &dummy->u_debugreg[5]) return -EIO;
+			  if(addr < (long) &dummy->u_debugreg[4] &&
+			     ((unsigned long) data) >= 0xbffffffd) return -EIO;
+			  
+			  if(addr == (long) &dummy->u_debugreg[7]) {
+				  data &= ~DR_CONTROL_RESERVED;
+				  for(i=0; i<4; i++)
+					  if ((0x5f54 >> ((data >> (16 + 4*i)) & 0xf)) & 1)
+						  return -EIO;
+			  };
+
+			  addr -= (long) &dummy->u_debugreg;
+			  addr = addr >> 2;
+			  child->debugreg[addr] = data;
+			  return 0;
+		  };
+		  return -EIO;
 
 		case PTRACE_SYSCALL: /* continue and stop at next (return from) syscall */
 		case PTRACE_CONT: { /* restart after signal. */
@@ -323,8 +403,8 @@ extern "C" int sys_ptrace(long request, long pid, long addr, long data)
 			child->exit_code = data;
 			child->state = TASK_RUNNING;
 	/* make sure the single step bit is not set. */
-			tmp = get_stack_long(child, 4*EFL-MAGICNUMBER) & ~TRAP_FLAG;
-			put_stack_long(child, 4*EFL-MAGICNUMBER,tmp);
+			tmp = get_stack_long(child, sizeof(long)*EFL-MAGICNUMBER) & ~TRAP_FLAG;
+			put_stack_long(child, sizeof(long)*EFL-MAGICNUMBER,tmp);
 			return 0;
 		}
 
@@ -339,8 +419,8 @@ extern "C" int sys_ptrace(long request, long pid, long addr, long data)
 			child->state = TASK_RUNNING;
 			child->exit_code = SIGKILL;
 	/* make sure the single step bit is not set. */
-			tmp = get_stack_long(child, 4*EFL-MAGICNUMBER) & ~TRAP_FLAG;
-			put_stack_long(child, 4*EFL-MAGICNUMBER,tmp);
+			tmp = get_stack_long(child, sizeof(long)*EFL-MAGICNUMBER) & ~TRAP_FLAG;
+			put_stack_long(child, sizeof(long)*EFL-MAGICNUMBER,tmp);
 			return 0;
 		}
 
@@ -350,8 +430,8 @@ extern "C" int sys_ptrace(long request, long pid, long addr, long data)
 			if ((unsigned long) data > NSIG)
 				return -EIO;
 			child->flags &= ~PF_TRACESYS;
-			tmp = get_stack_long(child, 4*EFL-MAGICNUMBER) | TRAP_FLAG;
-			put_stack_long(child, 4*EFL-MAGICNUMBER,tmp);
+			tmp = get_stack_long(child, sizeof(long)*EFL-MAGICNUMBER) | TRAP_FLAG;
+			put_stack_long(child, sizeof(long)*EFL-MAGICNUMBER,tmp);
 			child->state = TASK_RUNNING;
 			child->exit_code = data;
 	/* give it a chance to run. */
@@ -370,8 +450,8 @@ extern "C" int sys_ptrace(long request, long pid, long addr, long data)
 			child->p_pptr = child->p_opptr;
 			SET_LINKS(child);
 			/* make sure the single step bit is not set. */
-			tmp = get_stack_long(child, 4*EFL-MAGICNUMBER) & ~TRAP_FLAG;
-			put_stack_long(child, 4*EFL-MAGICNUMBER,tmp);
+			tmp = get_stack_long(child, sizeof(long)*EFL-MAGICNUMBER) & ~TRAP_FLAG;
+			put_stack_long(child, sizeof(long)*EFL-MAGICNUMBER,tmp);
 			return 0;
 		}
 
@@ -380,7 +460,7 @@ extern "C" int sys_ptrace(long request, long pid, long addr, long data)
 	}
 }
 
-extern "C" void syscall_trace(void)
+asmlinkage void syscall_trace(void)
 {
 	if ((current->flags & (PF_PTRACED|PF_TRACESYS))
 			!= (PF_PTRACED|PF_TRACESYS))

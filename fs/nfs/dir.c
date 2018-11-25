@@ -13,6 +13,7 @@
 #include <linux/fcntl.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
+#include <linux/malloc.h>
 #include <linux/mm.h>
 
 #include <asm/segment.h>	/* for fs functions */
@@ -477,7 +478,7 @@ static int nfs_symlink(struct inode *dir, const char *name, int len,
 		iput(dir);
 		return -ENAMETOOLONG;
 	}
-	sattr.mode = S_IFLNK | 0777; /* SunOS 4.1.2 crashes without this! */
+	sattr.mode = S_IFLNK | S_IRWXUGO; /* SunOS 4.1.2 crashes without this! */
 	sattr.uid = sattr.gid = sattr.size = (unsigned) -1;
 	sattr.atime.seconds = sattr.mtime.seconds = (unsigned) -1;
 	error = nfs_proc_symlink(NFS_SERVER(dir), NFS_FH(dir),

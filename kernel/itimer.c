@@ -53,7 +53,7 @@ int _getitimer(int which, struct itimerval *value)
 	return(0);
 }
 
-extern "C" int sys_getitimer(int which, struct itimerval *value)
+asmlinkage int sys_getitimer(int which, struct itimerval *value)
 {
 	int error;
 	struct itimerval get_buffer;
@@ -81,14 +81,23 @@ int _setitimer(int which, struct itimerval *value, struct itimerval *ovalue)
 		return k;
 	switch (which) {
 		case ITIMER_REAL:
+			if (j) {
+				j += 1+itimer_ticks;
+				if (j < itimer_next)
+					itimer_next = j;
+			}
 			current->it_real_value = j;
 			current->it_real_incr = i;
 			break;
 		case ITIMER_VIRTUAL:
+			if (j)
+				j++;
 			current->it_virt_value = j;
 			current->it_virt_incr = i;
 			break;
 		case ITIMER_PROF:
+			if (j)
+				j++;
 			current->it_prof_value = j;
 			current->it_prof_incr = i;
 			break;
@@ -98,7 +107,7 @@ int _setitimer(int which, struct itimerval *value, struct itimerval *ovalue)
 	return 0;
 }
 
-extern "C" int sys_setitimer(int which, struct itimerval *value, struct itimerval *ovalue)
+asmlinkage int sys_setitimer(int which, struct itimerval *value, struct itimerval *ovalue)
 {
 	int error;
 	struct itimerval set_buffer, get_buffer;

@@ -4,9 +4,12 @@
  */
 
 #include <linux/errno.h>
-#include <asm/segment.h>
 #include <linux/sched.h>
 #include <linux/msg.h>
+#include <linux/stat.h>
+#include <linux/malloc.h>
+
+#include <asm/segment.h>
 
 extern int ipcperms (struct ipc_perm *ipcp, short msgflg);
 
@@ -17,7 +20,7 @@ static int findkey (key_t key);
 static struct msqid_ds *msgque[MSGMNI];
 static int msgbytes = 0;
 static int msghdrs = 0;
-static int msg_seq = 0;
+static unsigned short msg_seq = 0;
 static int used_queues = 0;
 static int max_msqid = 0;
 static struct wait_queue *msg_lock = NULL;
@@ -59,7 +62,7 @@ int sys_msgsnd (int msqid, struct msgbuf *msgp, int msgsz, int msgflg)
  slept:
 	if (ipcp->seq != (msqid / MSGMNI)) 
 		return -EIDRM;
-	if (ipcperms(ipcp, 0222)) 
+	if (ipcperms(ipcp, S_IWUGO)) 
 		return -EACCES;
 	
 	if (msgsz + msq->msg_cbytes > msq->msg_qbytes) { 
@@ -137,7 +140,7 @@ int sys_msgrcv (int msqid, struct msgbuf *msgp, int msgsz, long msgtyp,
 	while (!nmsg) {
 		if(ipcp->seq != msqid / MSGMNI)
 			return -EIDRM;
-		if (ipcperms (ipcp, 0444))
+		if (ipcperms (ipcp, S_IRUGO))
 			return -EACCES;
 		if (msgtyp == 0) 
 			nmsg = msq->msg_first;
@@ -243,7 +246,7 @@ found:
 		return -ENOMEM;
 	}
 	ipcp = &msq->msg_perm;
-	ipcp->mode = (msgflg & 0x01FF);
+	ipcp->mode = (msgflg & S_IRWXUGO);
 	ipcp->key = key;
 	ipcp->cuid = ipcp->uid = current->euid;
 	ipcp->gid = ipcp->cgid = current->egid;
@@ -261,7 +264,7 @@ found:
 	used_queues++;
 	if (msg_lock)
 		wake_up (&msg_lock);
-	return msg_seq * MSGMNI + id;
+	return (int) msg_seq * MSGMNI + id;
 }
 
 int sys_msgget (key_t key, int msgflg)
@@ -292,8 +295,7 @@ static void freeque (int id)
 	struct msg *msgp, *msgh;
 
 	msq->msg_perm.seq++;
-	if ((int)((++msg_seq + 1) * MSGMNI) < 0)
-		msg_seq = 0;
+	msg_seq++;
 	msgbytes -= msq->msg_cbytes;
 	if (id == max_msqid)
 		while (max_msqid && (msgque[--max_msqid] == IPC_UNUSED));
@@ -359,7 +361,7 @@ int sys_msgctl (int msqid, int cmd, struct msqid_ds *buf)
 		msq = msgque[msqid];
 		if (msq == IPC_UNUSED || msq == IPC_NOID)
 			return -EINVAL;
-		if (ipcperms (&msq->msg_perm, 0444))
+		if (ipcperms (&msq->msg_perm, S_IRUGO))
 			return -EACCES;
 		id = msqid + msq->msg_perm.seq * MSGMNI; 
 		memcpy_tofs (buf, msq, sizeof(*msq));
@@ -388,7 +390,7 @@ int sys_msgctl (int msqid, int cmd, struct msqid_ds *buf)
 
 	switch (cmd) {
 	case IPC_STAT:
-		if (ipcperms (ipcp, 0444))
+		if (ipcperms (ipcp, S_IRUGO))
 			return -EACCES;
 		memcpy_tofs (buf, msq, sizeof (*msq));
 		return 0;
@@ -406,8 +408,8 @@ int sys_msgctl (int msqid, int cmd, struct msqid_ds *buf)
 		msq->msg_qbytes = tbuf.msg_qbytes;
 		ipcp->uid = tbuf.msg_perm.uid;
 		ipcp->gid =  tbuf.msg_perm.gid;
-		ipcp->mode = (ipcp->mode & ~0x1FF) | 
-			(0x1FF & tbuf.msg_perm.mode);
+		ipcp->mode = (ipcp->mode & ~S_IRWXUGO) | 
+			(S_IRWXUGO & tbuf.msg_perm.mode);
 		msq->msg_ctime = CURRENT_TIME;
 		break;
 	default:

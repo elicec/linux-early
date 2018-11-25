@@ -1,7 +1,9 @@
 /*
  *  linux/fs/ext2/symlink.c
  *
- *  Copyright (C) 1992, 1993  Remy Card (card@masi.ibp.fr)
+ *  Copyright (C) 1992, 1993, 1994  Remy Card (card@masi.ibp.fr)
+ *                                  Laboratoire MASI - Institut Blaise Pascal
+ *                                  Universite Pierre et Marie Curie (Paris VI)
  *
  *  from
  *
@@ -15,9 +17,9 @@
 #include <asm/segment.h>
 
 #include <linux/errno.h>
-#include <linux/sched.h>
 #include <linux/fs.h>
 #include <linux/ext2_fs.h>
+#include <linux/sched.h>
 #include <linux/stat.h>
 
 static int ext2_readlink (struct inode *, char *, int);
@@ -38,7 +40,7 @@ struct inode_operations ext2_symlink_inode_operations = {
 	NULL,			/* rmdir */
 	NULL,			/* mknod */
 	NULL,			/* rename */
-	ext2_readlink,	/* readlink */
+	ext2_readlink,		/* readlink */
 	ext2_follow_link,	/* follow_link */
 	NULL,			/* bmap */
 	NULL,			/* truncate */
@@ -55,7 +57,7 @@ static int ext2_follow_link(struct inode * dir, struct inode * inode,
 	*res_inode = NULL;
 	if (!dir) {
 		dir = current->root;
-		dir->i_count ++;
+		dir->i_count++;
 	}
 	if (!inode) {
 		iput (dir);
@@ -80,9 +82,9 @@ static int ext2_follow_link(struct inode * dir, struct inode * inode,
 		link = bh->b_data;
 	} else
 		link = (char *) inode->u.ext2_i.i_data;
-	current->link_count ++;
+	current->link_count++;
 	error = open_namei (link, flag, mode, res_inode, dir);
-	current->link_count --;
+	current->link_count--;
 	iput (inode);
 	if (bh)
 		brelse (bh);
@@ -114,7 +116,7 @@ static int ext2_readlink (struct inode * inode, char * buffer, int buflen)
 		link = (char *) inode->u.ext2_i.i_data;
 	i = 0;
 	while (i < buflen && (c = link[i])) {
-		i ++;
+		i++;
 		put_fs_byte (c, buffer++);
 	}
 	iput (inode);

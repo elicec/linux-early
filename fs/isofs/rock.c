@@ -11,6 +11,7 @@
 #include <linux/iso_fs.h>
 #include <linux/string.h>
 #include <linux/mm.h>
+#include <linux/malloc.h>
 
 #include "rock.h"
 
@@ -52,19 +53,27 @@
 #define MAYBE_CONTINUE(LABEL,DEV) \
   {if (buffer) kfree(buffer); \
   if (cont_extent){ \
-    int block, offset; \
+    int block, offset, offset1; \
     struct buffer_head * bh; \
     buffer = kmalloc(cont_size,GFP_KERNEL); \
     block = cont_extent; \
     offset = cont_offset; \
+    offset1 = 0; \
     if(ISOFS_BUFFER_SIZE(DEV) == 1024) {     \
       block <<= 1;    \
       if (offset >= 1024) block++; \
       offset &= 1023; \
+      if(offset + cont_size >= 1024) { \
+	  bh = bread(DEV->i_dev, block++, ISOFS_BUFFER_SIZE(DEV)); \
+	  memcpy(buffer, bh->b_data + offset, 1024 - offset); \
+          brelse(bh); \
+	  offset1 = 1024 - offset; \
+	  offset = 0; \
+      }  \
     };     \
     bh = bread(DEV->i_dev, block, ISOFS_BUFFER_SIZE(DEV)); \
     if(bh){       \
-      memcpy(buffer, bh->b_data, cont_size); \
+      memcpy(buffer + offset1, bh->b_data + offset, cont_size - offset1); \
       brelse(bh); \
       chr = (unsigned char *) buffer; \
       len = cont_size; \
@@ -249,6 +258,7 @@ int parse_rock_ridge_inode(struct iso_directory_record * de,
     int cnt, sig;
     struct inode * reloc;
     struct rock_ridge * rr;
+    int rootflag;
     
     while (len > 1){ /* There may be one byte for padding somewhere */
       rr = (struct rock_ridge *) chr;
@@ -289,17 +299,26 @@ int parse_rock_ridge_inode(struct iso_directory_record * de,
 	};
 	break;
       case SIG('T','F'):
+	/* Some RRIP writers incorrectly place ctime in the TF_CREATE field.
+	   Try and handle this correctly for either case. */
 	cnt = 0; /* Rock ridge never appears on a High Sierra disk */
-	if(rr->u.TF.flags & TF_CREATE) inode->i_ctime = iso_date(rr->u.TF.times[cnt++].time, 0);
-	if(rr->u.TF.flags & TF_MODIFY) inode->i_mtime = iso_date(rr->u.TF.times[cnt++].time, 0);
-	if(rr->u.TF.flags & TF_ACCESS) inode->i_atime = iso_date(rr->u.TF.times[cnt++].time, 0);
+	if(rr->u.TF.flags & TF_CREATE) 
+	  inode->i_ctime = iso_date(rr->u.TF.times[cnt++].time, 0);
+	if(rr->u.TF.flags & TF_MODIFY) 
+	  inode->i_mtime = iso_date(rr->u.TF.times[cnt++].time, 0);
+	if(rr->u.TF.flags & TF_ACCESS) 
+	  inode->i_atime = iso_date(rr->u.TF.times[cnt++].time, 0);
+	if(rr->u.TF.flags & TF_ATTRIBUTES) 
+	  inode->i_ctime = iso_date(rr->u.TF.times[cnt++].time, 0);
 	break;
       case SIG('S','L'):
 	{int slen;
 	 struct SL_component * slp;
 	 slen = rr->len - 5;
 	 slp = &rr->u.SL.link;
+	 inode->i_size = 0;
 	 while (slen > 1){
+	   rootflag = 0;
 	   switch(slp->flags &~1){
 	   case 0:
 	     inode->i_size += slp->len;
@@ -311,6 +330,7 @@ int parse_rock_ridge_inode(struct iso_directory_record * de,
 	     inode->i_size += 2;
 	     break;
 	   case 8:
+	     rootflag = 1;
 	     inode->i_size += 1;
 	     break;
 	   default:
@@ -320,7 +340,7 @@ int parse_rock_ridge_inode(struct iso_directory_record * de,
 	   slp = (struct SL_component *) (((char *) slp) + slp->len + 2);
 
 	   if(slen < 2) break;
-	   inode->i_size += 1;
+	   if(!rootflag) inode->i_size += 1;
 	 };
        };
 	break;
@@ -363,6 +383,8 @@ int parse_rock_ridge_inode(struct iso_directory_record * de,
 
 char * get_rock_ridge_symlink(struct inode * inode)
 {
+  unsigned long bufsize = ISOFS_BUFFER_SIZE(inode);
+  unsigned char bufbits = ISOFS_BUFFER_BITS(inode);
   struct buffer_head * bh;
   unsigned char * pnt;
   void * cpnt = NULL;
@@ -371,6 +393,7 @@ char * get_rock_ridge_symlink(struct inode * inode)
   CONTINUE_DECLS;
   int block;
   int sig;
+  int rootflag;
   int len;
   unsigned char * chr;
   struct rock_ridge * rr;
@@ -380,22 +403,27 @@ char * get_rock_ridge_symlink(struct inode * inode)
 
   rpnt = 0;
   
-  block = inode->i_ino >> ISOFS_BUFFER_BITS(inode);
-  if (!(bh=bread(inode->i_dev,block, ISOFS_BUFFER_SIZE(inode))))
-    panic("unable to read i-node block");
+  block = inode->i_ino >> bufbits;
+  if (!(bh=bread(inode->i_dev,block, bufsize))) {
+    printk("unable to read i-node block");
+    return NULL;
+  };
   
-  pnt = ((unsigned char *) bh->b_data) + (inode->i_ino & (ISOFS_BUFFER_SIZE(inode) - 1));
+  pnt = ((unsigned char *) bh->b_data) + (inode->i_ino & (bufsize - 1));
   
   raw_inode = ((struct iso_directory_record *) pnt);
   
-  if ((inode->i_ino & (ISOFS_BUFFER_SIZE(inode) - 1)) + *pnt > ISOFS_BUFFER_SIZE(inode)){
+  if ((inode->i_ino & (bufsize - 1)) + *pnt > bufsize){
     cpnt = kmalloc(1 << ISOFS_BLOCK_BITS, GFP_KERNEL);
-    memcpy(cpnt, bh->b_data, ISOFS_BUFFER_SIZE(inode));
+    memcpy(cpnt, bh->b_data, bufsize);
     brelse(bh);
-    if (!(bh = bread(inode->i_dev,++block, ISOFS_BUFFER_SIZE(inode))))
-      panic("unable to read i-node block");
-    memcpy(cpnt+ISOFS_BUFFER_SIZE(inode), bh->b_data, ISOFS_BUFFER_SIZE(inode));
-    pnt = ((unsigned char *) cpnt) + (inode->i_ino & (ISOFS_BUFFER_SIZE(inode) - 1));
+    if (!(bh = bread(inode->i_dev,++block, bufsize))) {
+      kfree_s(cpnt, 1 << ISOFS_BLOCK_BITS);
+      printk("unable to read i-node block");
+      return NULL;
+    };
+    memcpy((char *)cpnt+bufsize, bh->b_data, bufsize);
+    pnt = ((unsigned char *) cpnt) + (inode->i_ino & (bufsize - 1));
     raw_inode = ((struct iso_directory_record *) pnt);
   };
   
@@ -430,6 +458,7 @@ char * get_rock_ridge_symlink(struct inode * inode)
 	   rpnt = (char *) kmalloc (inode->i_size +1, GFP_KERNEL);
 	   *rpnt = 0;
 	 };
+	 rootflag = 0;
 	 switch(slp->flags &~1){
 	 case 0:
 	   strncat(rpnt,slp->text, slp->len);
@@ -441,7 +470,8 @@ char * get_rock_ridge_symlink(struct inode * inode)
 	   strcat(rpnt,"..");
 	   break;
 	 case 8:
-	   strcpy(rpnt,"/");
+	   rootflag = 1;
+	   strcat(rpnt,"/");
 	   break;
 	 default:
 	   printk("Symlink component flag not implemented (%d)\n",slen);
@@ -450,7 +480,7 @@ char * get_rock_ridge_symlink(struct inode * inode)
 	 slp = (struct SL_component *) (((char *) slp) + slp->len + 2);
 
 	 if(slen < 2) break;
-	 strcat(rpnt,"/");
+	 if(!rootflag) strcat(rpnt,"/");
        };
        break;
      default:

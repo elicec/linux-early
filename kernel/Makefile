@@ -16,21 +16,16 @@
 .c.o:
 	$(CC) $(CFLAGS) -c $<
 
-SUBDIRS	= chr_drv blk_drv FPU-emu
-
 OBJS  = sched.o sys_call.o traps.o irq.o dma.o fork.o \
-	panic.o printk.o vsprintf.o sys.o exit.o \
+ 	panic.o printk.o vsprintf.o sys.o module.o ksyms.o exit.o \
 	signal.o mktime.o ptrace.o ioport.o itimer.o \
-	info.o
+	info.o ldt.o time.o
 
-all: kernel.o kernelsubdirs
+all: kernel.o
 
 kernel.o: $(OBJS)
 	$(LD) -r -o kernel.o $(OBJS)
 	sync
-
-kernelsubdirs: dummy
-	@for i in $(SUBDIRS); do (cd $$i && echo $$i && $(MAKE)) || exit; done
 
 sys_call.s: sys_call.S
 
@@ -39,13 +34,16 @@ sys_call.o: sys_call.s
 sched.o: sched.c
 	$(CC) $(CFLAGS) $(PROFILING) -fno-omit-frame-pointer -c $<
 
-clean:
-	rm -f core *.o *.a *.s
-	for i in $(SUBDIRS); do (cd $$i && $(MAKE) clean); done
+ksyms.lst: ksyms.S ../include/linux/autoconf.h
+	$(CPP) $(CFLAGS) $< > $@
+ 
+ksyms.s: ksyms.sh ksyms.lst
+	sh $< > $@
+
+ksyms.o: ksyms.s
 
 dep:
 	$(CPP) -M *.c > .depend
-	for i in $(SUBDIRS); do (cd $$i && $(MAKE) dep) || exit; done
 
 dummy:
 

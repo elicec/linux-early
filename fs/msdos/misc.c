@@ -15,7 +15,7 @@
 /* Well-known binary file extensions */
 
 static char bin_extensions[] =
-  "EXECOMAPPSYSOVLOBJLIB"	/* program code */
+  "EXECOMBINAPPSYSDRVOVLOVROBJLIBDLLPIF"	/* program code */
   "ARCZIPLHALZHZOOTARZ  ARJ"	/* common archivers */
   "TZ TAZTZPTPZ"		/* abbreviations of tar.Z and tar.zip */
   "GIFBMPTIFGL JPGPCX"		/* graphics */
@@ -33,7 +33,7 @@ void fs_panic(struct super_block *s,char *msg)
 
 	not_ro = !(s->s_flags & MS_RDONLY);
 	if (not_ro) s->s_flags |= MS_RDONLY;
-	printk("Filesystem panic (dev 0x%04X, mounted on 0x%04X:%d)\n  %s\n",
+	printk("Filesystem panic (dev 0x%04X, mounted on 0x%04X:%ld)\n  %s\n",
 	    s->s_dev,s->s_covered->i_dev,s->s_covered->i_ino,msg);
 	if (not_ro)
 		printk("  File system has been set read-only\n");
@@ -141,7 +141,7 @@ printk("set to %x\n",fat_access(inode->i_sb,nr,-1));
 #endif
 	last = 0;
 	if ((current = MSDOS_I(inode)->i_start) != 0) {
-		cache_lookup(inode,0x7fffffff,&last,&current);
+		cache_lookup(inode,INT_MAX,&last,&current);
 		while (current && current != -1)
 			if (!(current = fat_access(inode->i_sb,
 			    last = current,-1))) {

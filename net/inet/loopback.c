@@ -5,35 +5,36 @@
  *
  *		Pseudo-driver for the loopback interface.
  *
- * Version:	@(#)loopback.c	1.0.4	05/25/93
+ * Version:	@(#)loopback.c	1.0.4b	08/16/93
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
+ *		Donald Becker, <becker@super.org>
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
  *		as published by the Free Software Foundation; either version
  *		2 of the License, or (at your option) any later version.
  */
-#include <asm/system.h>
-#include <asm/segment.h>
-#include <asm/io.h>
 #include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/fs.h>
-#include <linux/tty.h>
 #include <linux/types.h>
-#include <linux/ptrace.h>
 #include <linux/string.h>
 #include <linux/socket.h>
 #include <linux/errno.h>
 #include <linux/fcntl.h>
 #include <linux/in.h>
+#include <linux/if_ether.h>	/* For the statistics structure. */
+
+#include <asm/system.h>
+#include <asm/segment.h>
+#include <asm/io.h>
+
 #include "inet.h"
 #include "dev.h"
 #include "eth.h"
-#include "timer.h"
 #include "ip.h"
 #include "protocol.h"
 #include "tcp.h"
@@ -45,6 +46,7 @@
 static int
 loopback_xmit(struct sk_buff *skb, struct device *dev)
 {
+  struct enet_statistics *stats = (struct enet_statistics *)dev->priv;
   int done;
 
   DPRINTF((DBG_LOOPB, "loopback_xmit(dev=%X, skb=%X)\n", dev, skb));
@@ -53,17 +55,20 @@ loopback_xmit(struct sk_buff *skb, struct device *dev)
   cli();
   if (dev->tbusy != 0) {
 	sti();
+	stats->tx_errors++;
 	return(1);
   }
   dev->tbusy = 1;
   sti();
 
-  done = dev_rint((unsigned char *)(skb+1), skb->len, 0, dev);
+  done = dev_rint(skb->data, skb->len, 0, dev);
   if (skb->free) kfree_skb(skb, FREE_WRITE);
 
   while (done != 1) {
 	done = dev_rint(NULL, 0, 0, dev);
   }
+  stats->tx_packets++;
+
   dev->tbusy = 0;
 
 #if 1
@@ -84,6 +89,11 @@ loopback_xmit(struct sk_buff *skb, struct device *dev)
   return(0);
 }
 
+static struct enet_statistics *
+get_stats(struct device *dev)
+{
+    return (struct enet_statistics *)dev->priv;
+}
 
 /* Initialize the rest of the LOOPBACK device. */
 int
@@ -119,6 +129,9 @@ loopback_init(struct device *dev)
   dev->pa_brdaddr	= in_aton("127.255.255.255");
   dev->pa_mask		= in_aton("255.0.0.0");
   dev->pa_alen		= sizeof(unsigned long);
-
+  dev->priv = kmalloc(sizeof(struct enet_statistics), GFP_KERNEL);
+  memset(dev->priv, 0, sizeof(struct enet_statistics));
+  dev->get_stats = get_stats;
+  
   return(0);
 };

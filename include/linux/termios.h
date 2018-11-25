@@ -47,14 +47,17 @@
 #define TIOCSERCONFIG	0x5453
 #define TIOCSERGWILD	0x5454
 #define TIOCSERSWILD	0x5455
+#define TIOCGLCKTRMIOS	0x5456
+#define TIOCSLCKTRMIOS	0x5457
 
 /* Used for packet mode */
+#define TIOCPKT_DATA		 0
 #define TIOCPKT_FLUSHREAD	 1
 #define TIOCPKT_FLUSHWRITE	 2
 #define TIOCPKT_STOP		 4
 #define TIOCPKT_START		 8
-#define TIOCPKT_DOSTOP		16
-#define TIOCPKT_NOSTOP		32
+#define TIOCPKT_NOSTOP		16
+#define TIOCPKT_DOSTOP		32
 
 struct winsize {
 	unsigned short ws_row;
@@ -147,9 +150,9 @@ struct termios {
 #define VTDLY	0040000
 #define   VT0	0000000
 #define   VT1	0040000
-#define FFDLY	0040000
+#define FFDLY	0100000
 #define   FF0	0000000
-#define   FF1	0040000
+#define   FF1	0100000
 
 /* c_cflag bit meaning */
 #define CBAUD	0000017
@@ -235,5 +238,6 @@ struct termios {
 #define N_TTY		0
 #define N_SLIP		1
 #define N_MOUSE		2
+#define N_PPP		3
 
 #endif

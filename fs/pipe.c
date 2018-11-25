@@ -13,33 +13,54 @@
 #include <linux/fcntl.h>
 #include <linux/termios.h>
 
+
+/* We don't use the head/tail construction any more. Now we use the start/len*/
+/* contruction providing full use of PIPE_BUF (multiple of PAGE_SIZE) */
+/* Florian Coosmann (FGC)                                ^ current = 1       */
+/* Additionally, we now use locking technique. This prevents race condition  */
+/* in case of paging and multiple read/write on the same pipe. (FGC)         */
+
+
 static int pipe_read(struct inode * inode, struct file * filp, char * buf, int count)
 {
-	int chars, size, read = 0;
+	int chars = 0, size = 0, read = 0;
+        char *pipebuf;
 
-	if (!(filp->f_flags & O_NONBLOCK))
-		while (!PIPE_SIZE(*inode)) {
-			wake_up(& PIPE_WRITE_WAIT(*inode));
-			if (!PIPE_WRITERS(*inode)) /* are there any writers? */
+	if (filp->f_flags & O_NONBLOCK) {
+		if (PIPE_LOCK(*inode))
+			return -EAGAIN;
+		if (PIPE_EMPTY(*inode))
+			if (PIPE_WRITERS(*inode))
+				return -EAGAIN;
+			else
 				return 0;
-			if (current->signal & ~current->blocked)
-				return -ERESTARTSYS;
-			interruptible_sleep_on(& PIPE_READ_WAIT(*inode));
+	} else while (PIPE_EMPTY(*inode) || PIPE_LOCK(*inode)) {
+		if (PIPE_EMPTY(*inode)) {
+			if (!PIPE_WRITERS(*inode))
+				return 0;
 		}
+		if (current->signal & ~current->blocked)
+			return -ERESTARTSYS;
+		interruptible_sleep_on(&PIPE_WAIT(*inode));
+	}
+	PIPE_LOCK(*inode)++;
 	while (count>0 && (size = PIPE_SIZE(*inode))) {
-		chars = PAGE_SIZE-PIPE_TAIL(*inode);
+		chars = PIPE_MAX_RCHUNK(*inode);
 		if (chars > count)
 			chars = count;
 		if (chars > size)
 			chars = size;
-		memcpy_tofs(buf, PIPE_BASE(*inode)+PIPE_TAIL(*inode), chars );
 		read += chars;
-		PIPE_TAIL(*inode) += chars;
-		PIPE_TAIL(*inode) &= (PAGE_SIZE-1);
+                pipebuf = PIPE_BASE(*inode)+PIPE_START(*inode);
+		PIPE_START(*inode) += chars;
+		PIPE_START(*inode) &= (PIPE_BUF-1);
+		PIPE_LEN(*inode) -= chars;
 		count -= chars;
+		memcpy_tofs(buf, pipebuf, chars );
 		buf += chars;
 	}
-	wake_up(& PIPE_WRITE_WAIT(*inode));
+	PIPE_LOCK(*inode)--;
+	wake_up_interruptible(&PIPE_WAIT(*inode));
 	if (read)
 		return read;
 	if (PIPE_WRITERS(*inode))
@@ -49,45 +70,47 @@ static int pipe_read(struct inode * inode, struct file * filp, char * buf, int c
 	
 static int pipe_write(struct inode * inode, struct file * filp, char * buf, int count)
 {
-	int chars, size, written = 0;
+	int chars = 0, free = 0, written = 0;
+	char *pipebuf;
 
 	if (!PIPE_READERS(*inode)) { /* no readers */
 		send_sig(SIGPIPE,current,0);
 		return -EPIPE;
 	}
-/* if count < PAGE_SIZE, we have to make it atomic */
-	if (count < PAGE_SIZE)
-		size = PAGE_SIZE-count;
+/* if count <= PIPE_BUF, we have to make it atomic */
+	if (count <= PIPE_BUF)
+		free = count;
 	else
-		size = PAGE_SIZE-1;
+		free = 1; /* can't do it atomically, wait for any free space */
 	while (count>0) {
-		while (PIPE_SIZE(*inode) >= size) {
+		while ((PIPE_FREE(*inode) < free) || PIPE_LOCK(*inode)) {
 			if (!PIPE_READERS(*inode)) { /* no readers */
 				send_sig(SIGPIPE,current,0);
-				return written?written:-EPIPE;
+				return written? :-EPIPE;
 			}
 			if (current->signal & ~current->blocked)
-				return written?written:-ERESTARTSYS;
+				return written? :-ERESTARTSYS;
 			if (filp->f_flags & O_NONBLOCK)
-				return written?written:-EAGAIN;
-			else
-				interruptible_sleep_on(&PIPE_WRITE_WAIT(*inode));
+				return written? :-EAGAIN;
+			interruptible_sleep_on(&PIPE_WAIT(*inode));
 		}
-		while (count>0 && (size = (PAGE_SIZE-1)-PIPE_SIZE(*inode))) {
-			chars = PAGE_SIZE-PIPE_HEAD(*inode);
+		PIPE_LOCK(*inode)++;
+		while (count>0 && (free = PIPE_FREE(*inode))) {
+			chars = PIPE_MAX_WCHUNK(*inode);
 			if (chars > count)
 				chars = count;
-			if (chars > size)
-				chars = size;
-			memcpy_fromfs(PIPE_BASE(*inode)+PIPE_HEAD(*inode), buf, chars );
+			if (chars > free)
+				chars = free;
+                        pipebuf = PIPE_BASE(*inode)+PIPE_END(*inode);
 			written += chars;
-			PIPE_HEAD(*inode) += chars;
-			PIPE_HEAD(*inode) &= (PAGE_SIZE-1);
+			PIPE_LEN(*inode) += chars;
 			count -= chars;
+			memcpy_fromfs(pipebuf, buf, chars );
 			buf += chars;
 		}
-		wake_up(& PIPE_READ_WAIT(*inode));
-		size = PAGE_SIZE-1;
+		PIPE_LOCK(*inode)--;
+		wake_up_interruptible(&PIPE_WAIT(*inode));
+		free = 1;
 	}
 	return written;
 }
@@ -129,12 +152,38 @@ static int pipe_select(struct inode * inode, struct file * filp, int sel_type, s
 		case SEL_IN:
 			if (!PIPE_EMPTY(*inode) || !PIPE_WRITERS(*inode))
 				return 1;
-			select_wait(&PIPE_READ_WAIT(*inode), wait);
+			select_wait(&PIPE_WAIT(*inode), wait);
 			return 0;
 		case SEL_OUT:
 			if (!PIPE_FULL(*inode) || !PIPE_READERS(*inode))
 				return 1;
-			select_wait(&PIPE_WRITE_WAIT(*inode), wait);
+			select_wait(&PIPE_WAIT(*inode), wait);
+			return 0;
+		case SEL_EX:
+			if (!PIPE_READERS(*inode) || !PIPE_WRITERS(*inode))
+				return 1;
+			select_wait(&inode->i_wait,wait);
+			return 0;
+	}
+	return 0;
+}
+
+/*
+ * Arggh. Why does SunOS have to have different select() behaviour
+ * for pipes and fifos? Hate-Hate-Hate. See difference in SEL_IN..
+ */
+static int fifo_select(struct inode * inode, struct file * filp, int sel_type, select_table * wait)
+{
+	switch (sel_type) {
+		case SEL_IN:
+			if (!PIPE_EMPTY(*inode))
+				return 1;
+			select_wait(&PIPE_WAIT(*inode), wait);
+			return 0;
+		case SEL_OUT:
+			if (!PIPE_FULL(*inode) || !PIPE_READERS(*inode))
+				return 1;
+			select_wait(&PIPE_WAIT(*inode), wait);
 			return 0;
 		case SEL_EX:
 			if (!PIPE_READERS(*inode) || !PIPE_WRITERS(*inode))
@@ -157,12 +206,12 @@ static int connect_read(struct inode * inode, struct file * filp, char * buf, in
 			break;
 		if (filp->f_flags & O_NONBLOCK)
 			return -EAGAIN;
-		wake_up(& PIPE_WRITE_WAIT(*inode));
+		wake_up_interruptible(& PIPE_WAIT(*inode));
 		if (current->signal & ~current->blocked)
 			return -ERESTARTSYS;
-		interruptible_sleep_on(& PIPE_READ_WAIT(*inode));
+		interruptible_sleep_on(& PIPE_WAIT(*inode));
 	}
-	filp->f_op = &read_pipe_fops;
+	filp->f_op = &read_fifo_fops;
 	return pipe_read(inode,filp,buf,count);
 }
 
@@ -171,15 +220,15 @@ static int connect_select(struct inode * inode, struct file * filp, int sel_type
 	switch (sel_type) {
 		case SEL_IN:
 			if (!PIPE_EMPTY(*inode)) {
-				filp->f_op = &read_pipe_fops;
+				filp->f_op = &read_fifo_fops;
 				return 1;
 			}
-			select_wait(&PIPE_READ_WAIT(*inode), wait);
+			select_wait(&PIPE_WAIT(*inode), wait);
 			return 0;
 		case SEL_OUT:
 			if (!PIPE_FULL(*inode))
 				return 1;
-			select_wait(&PIPE_WRITE_WAIT(*inode), wait);
+			select_wait(&PIPE_WAIT(*inode), wait);
 			return 0;
 		case SEL_EX:
 			if (!PIPE_READERS(*inode) || !PIPE_WRITERS(*inode))
@@ -197,28 +246,27 @@ static int connect_select(struct inode * inode, struct file * filp, int sel_type
 static void pipe_read_release(struct inode * inode, struct file * filp)
 {
 	PIPE_READERS(*inode)--;
-	wake_up(&PIPE_WRITE_WAIT(*inode));
+	wake_up_interruptible(&PIPE_WAIT(*inode));
 }
 
 static void pipe_write_release(struct inode * inode, struct file * filp)
 {
 	PIPE_WRITERS(*inode)--;
-	wake_up(&PIPE_READ_WAIT(*inode));
+	wake_up_interruptible(&PIPE_WAIT(*inode));
 }
 
 static void pipe_rdwr_release(struct inode * inode, struct file * filp)
 {
 	PIPE_READERS(*inode)--;
 	PIPE_WRITERS(*inode)--;
-	wake_up(&PIPE_READ_WAIT(*inode));
-	wake_up(&PIPE_WRITE_WAIT(*inode));
+	wake_up_interruptible(&PIPE_WAIT(*inode));
 }
 
 /*
  * The file_operations structs are not static because they
  * are also used in linux/fs/fifo.c to do operations on fifo's.
  */
-struct file_operations connecting_pipe_fops = {
+struct file_operations connecting_fifo_fops = {
 	pipe_lseek,
 	connect_read,
 	bad_pipe_rw,
@@ -228,6 +276,45 @@ struct file_operations connecting_pipe_fops = {
 	NULL,		/* no mmap on pipes.. surprise */
 	NULL,		/* no special open code */
 	pipe_read_release,
+	NULL
+};
+
+struct file_operations read_fifo_fops = {
+	pipe_lseek,
+	pipe_read,
+	bad_pipe_rw,
+	pipe_readdir,
+	fifo_select,
+	pipe_ioctl,
+	NULL,		/* no mmap on pipes.. surprise */
+	NULL,		/* no special open code */
+	pipe_read_release,
+	NULL
+};
+
+struct file_operations write_fifo_fops = {
+	pipe_lseek,
+	bad_pipe_rw,
+	pipe_write,
+	pipe_readdir,
+	fifo_select,
+	pipe_ioctl,
+	NULL,		/* mmap */
+	NULL,		/* no special open code */
+	pipe_write_release,
+	NULL
+};
+
+struct file_operations rdwr_fifo_fops = {
+	pipe_lseek,
+	pipe_read,
+	pipe_write,
+	pipe_readdir,
+	fifo_select,
+	pipe_ioctl,
+	NULL,		/* mmap */
+	NULL,		/* no special open code */
+	pipe_rdwr_release,
 	NULL
 };
 
@@ -288,7 +375,7 @@ struct inode_operations pipe_inode_operations = {
 	NULL			/* permission */
 };
 
-extern "C" int sys_pipe(unsigned long * fildes)
+asmlinkage int sys_pipe(unsigned long * fildes)
 {
 	struct inode * inode;
 	struct file * f[2];

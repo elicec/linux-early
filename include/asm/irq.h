@@ -8,6 +8,11 @@
  */
 
 #include <linux/segment.h>
+#include <linux/linkage.h>
+
+extern void disable_irq(unsigned int);
+extern void enable_irq(unsigned int);
+
 #define __STR(x) #x
 #define STR(x) __STR(x)
  
@@ -28,7 +33,9 @@
 	"mov %dx,%ds\n\t" \
 	"mov %dx,%es\n\t" \
 	"movl $" STR(USER_DS) ",%edx\n\t" \
-	"mov %dx,%fs\n\t"
+	"mov %dx,%fs\n\t"   \
+	"movl $0,%edx\n\t"  \
+	"movl %edx,%db7\n\t"
 
 /*
  * SAVE_MOST/RESTORE_MOST is used for the faster version of IRQ handlers,
@@ -117,9 +124,9 @@
 #define BAD_IRQ_NAME(nr) IRQ_NAME2(bad_IRQ##nr)
 	
 #define BUILD_IRQ(chip,nr,mask) \
-extern "C" void IRQ_NAME(nr); \
-extern "C" void FAST_IRQ_NAME(nr); \
-extern "C" void BAD_IRQ_NAME(nr); \
+asmlinkage void IRQ_NAME(nr); \
+asmlinkage void FAST_IRQ_NAME(nr); \
+asmlinkage void BAD_IRQ_NAME(nr); \
 __asm__( \
 "\n.align 4\n" \
 "_IRQ" #nr "_interrupt:\n\t" \

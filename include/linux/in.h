@@ -77,11 +77,11 @@ struct sockaddr_in {
 #define	IN_CLASSC_NSHIFT	8
 #define	IN_CLASSC_HOST		(0xffffffff & ~IN_CLASSC_NET)
 
-#define	IN_CLASSD(a)		((((long int) (a)) & 0xf0000000) = 0xe0000000)
+#define	IN_CLASSD(a)		((((long int) (a)) & 0xf0000000) == 0xe0000000)
 #define	IN_MULTICAST(a)		IN_CLASSD(a)
 
-#define	IN_EXPERIMENTAL(a)	((((long int) (a)) & 0xe0000000) = 0xe0000000)
-#define	IN_BADCLASS(a)		((((long int) (a)) & 0xf0000000) = 0xf0000000)
+#define	IN_EXPERIMENTAL(a)	((((long int) (a)) & 0xe0000000) == 0xe0000000)
+#define	IN_BADCLASS(a)		((((long int) (a)) & 0xf0000000) == 0xf0000000)
 
 /* Address to accept any incoming messages. */
 #define	INADDR_ANY		((unsigned long int) 0x00000000)
@@ -124,48 +124,61 @@ extern unsigned short int	htons(unsigned short int);
 static __inline__ unsigned long int
 __ntohl(unsigned long int x)
 {
-  register unsigned long int tmp __asm__ ("ax") = x;
-  __asm__ __volatile__ ("xchgb %%al,%%ah\n\t"   /* swap lower bytes	*/
-		"rorl $16,%%eax\n\t"		/* swap words		*/
-		"xchgb %%al,%%ah\n\t"		/* swap higher bytes	*/
-		: "=a" (tmp) : "a" (tmp) );
-  return(tmp);
+	__asm__("xchgb %b0,%h0\n\t"	/* swap lower bytes	*/
+		"rorl $16,%0\n\t"	/* swap words		*/
+		"xchgb %b0,%h0"		/* swap higher bytes	*/
+		:"=q" (x)
+		: "0" (x));
+	return x;
+}
+
+static __inline__ unsigned long int
+__constant_ntohl(unsigned long int x)
+{
+	return (((x & 0x000000ff) << 24) |
+		((x & 0x0000ff00) <<  8) |
+		((x & 0x00ff0000) >>  8) |
+		((x & 0xff000000) >> 24));
 }
 
 static __inline__ unsigned short int
 __ntohs(unsigned short int x)
 {
-  register unsigned short int tmp __asm__ ("ax") = x;
-  __asm__ __volatile__ ("xchgb %%al,%%ah\n\t"	/* swap bytes		*/
-		: "=a" (tmp) : "a" (tmp));
-  return(tmp);
-}
-
-static __inline__ unsigned long int
-__htonl(unsigned long int x)
-{
-  register unsigned long int tmp __asm__ ("ax") = x;
-  __asm__ __volatile__ ("xchgb %%al,%%ah\n\t"	/* swap lower bytes	*/
-		"rorl $16,%%eax\n\t"		/* swap words		*/
-		"xchgb %%al,%%ah\n\t"		/* swap higher bytes	*/
-		: "=a" (tmp) : "a" (tmp));
-  return(tmp);
+	__asm__("xchgb %b0,%h0"		/* swap bytes		*/
+		: "=q" (x)
+		:  "0" (x));
+	return x;
 }
 
 static __inline__ unsigned short int
-__htons(unsigned short int x)
+__constant_ntohs(unsigned short int x)
 {
-  register unsigned short int tmp __asm__ ("ax") = x;
-  __asm__ __volatile__ ("xchgb %%al,%%ah\n\t"   /* swap bytes */
-		: "=a" (tmp) : "a" (tmp));
-  return(tmp);
+	return (((x & 0x00ff) << 8) |
+		((x & 0xff00) >> 8));
 }
 
+#define __htonl(x) __ntohl(x)
+#define __htons(x) __ntohs(x)
+#define __constant_htonl(x) __constant_ntohl(x)
+#define __constant_htons(x) __constant_ntohs(x)
+
 #ifdef  __OPTIMIZE__
-#  define ntohl(x)	__ntohl((x))
-#  define ntohs(x)	__ntohs((x))
-#  define htonl(x)	__htonl((x))
-#  define htons(x)	__htons((x))
+#  define ntohl(x) \
+(__builtin_constant_p((x)) ? \
+ __constant_ntohl((x)) : \
+ __ntohl((x)))
+#  define ntohs(x) \
+(__builtin_constant_p((x)) ? \
+ __constant_ntohs((x)) : \
+ __ntohs((x)))
+#  define htonl(x) \
+(__builtin_constant_p((x)) ? \
+ __constant_htonl((x)) : \
+ __htonl((x)))
+#  define htons(x) \
+(__builtin_constant_p((x)) ? \
+ __constant_htons((x)) : \
+ __htons((x)))
 #endif
 
 #endif	/* _LINUX_IN_H */

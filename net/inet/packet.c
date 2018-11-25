@@ -10,6 +10,17 @@
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *
+ * Fixes:	
+ *		Alan Cox	:	verify_area() now used correctly
+ *		Alan Cox	:	new skbuff lists, look ma no backlogs!
+ *		Alan Cox	:	tidied skbuff lists.
+ *		Alan Cox	:	Now uses generic datagram routines I
+ *					added. Also fixed the peek/read crash
+ *					from all old Linux datagram code.
+ *		Alan Cox	:	Uses the improved datagram code.
+ *		Alan Cox	:	Added NULL's for socket options.
+ *
+ *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
  *		as published by the Free Software Foundation; either version
@@ -21,7 +32,6 @@
 #include <linux/socket.h>
 #include <linux/in.h>
 #include "inet.h"
-#include "timer.h"
 #include "dev.h"
 #include "ip.h"
 #include "protocol.h"
@@ -54,43 +64,17 @@ packet_rcv(struct sk_buff *skb, struct device *dev,  struct packet_type *pt)
   skb->dev = dev;
   skb->len += dev->hard_header_len;
 
-  /* Now see if we are in use. */
-  cli();
-  if (sk->inuse) {
-	sti();
-	/*
-	 * Drop any packets if we can't currently deal with
-	 * them. Assume that the other end will retransmit
-	 * if it was important.
-	 */
-	skb->sk = NULL;
-	kfree_skb(skb, FREE_READ);
-	return(0);
-  }
-  sk->inuse = 1;
-  sti();
   skb->sk = sk;
 
   /* Charge it too the socket. */
-  if (sk->rmem_alloc + skb->mem_len >= SK_RMEM_MAX) {
+  if (sk->rmem_alloc + skb->mem_len >= sk->rcvbuf) {
 	skb->sk = NULL;
 	kfree_skb(skb, FREE_READ);
 	return(0);
   }
   sk->rmem_alloc += skb->mem_len;
-
-  /* Now just put it onto the queue. */
-  if (sk->rqueue == NULL) {
-	sk->rqueue = skb;
-	skb->next = skb;
-	skb->prev = skb;
-  } else {
-	skb->next = sk->rqueue;
-	skb->prev = sk->rqueue->prev;
-	skb->prev->next = skb;
-	skb->next->prev = skb;
-  }
-  wake_up(sk->sleep);
+  skb_queue_tail(&sk->rqueue,skb);
+  wake_up_interruptible(sk->sleep);
   release_sock(sk);
   return(0);
 }
@@ -105,6 +89,7 @@ packet_sendto(struct sock *sk, unsigned char *from, int len,
   struct sk_buff *skb;
   struct device *dev;
   struct sockaddr saddr;
+  int err;
 
   /* Check the flags. */
   if (flags) return(-EINVAL);
@@ -113,33 +98,43 @@ packet_sendto(struct sock *sk, unsigned char *from, int len,
   /* Get and verify the address. */
   if (usin) {
 	if (addr_len < sizeof(saddr)) return(-EINVAL);
-	/* verify_area(VERIFY_WRITE, usin, sizeof(saddr));*/
+	err=verify_area(VERIFY_READ, usin, sizeof(saddr));
+	if(err)
+		return err;
 	memcpy_fromfs(&saddr, usin, sizeof(saddr));
   } else
 	return(-EINVAL);
+	
+  err=verify_area(VERIFY_READ,from,len);
+  if(err)
+  	return(err);
+/* Find the device first to size check it */
 
-  skb = (struct sk_buff *) sk->prot->wmalloc(sk, len+sizeof(*skb), 0, GFP_KERNEL);
+  saddr.sa_data[13] = 0;
+  dev = dev_get(saddr.sa_data);
+  if (dev == NULL) {
+	return(-ENXIO);
+  }
+  if(len>dev->mtu)
+  	return -EMSGSIZE;
+
+/* Now allocate the buffer, knowing 4K pagelimits wont break this line */  
+  skb = sk->prot->wmalloc(sk, len+sizeof(*skb), 0, GFP_KERNEL);
 
   /* This shouldn't happen, but it could. */
   if (skb == NULL) {
 	DPRINTF((DBG_PKT, "packet_sendto: write buffer full?\n"));
-	return(-EAGAIN);
+	return(-ENOMEM);
   }
-  skb->lock = 0;
+  /* Fill it in */
   skb->mem_addr = skb;
   skb->mem_len = len + sizeof(*skb);
   skb->sk = sk;
   skb->free = 1;
-  saddr.sa_data[13] = 0;
-  dev = dev_get(saddr.sa_data);
-  if (dev == NULL) {
-	sk->prot->wfree(sk, skb->mem_addr, skb->mem_len);
-	return(-ENXIO);
-  }
-  /* verify_area(VERIFY_WRITE, from, len);*/
-  memcpy_fromfs (skb+1, from, len);
+  memcpy_fromfs(skb->data, from, len);
   skb->len = len;
   skb->next = NULL;
+  skb->arp = 1;
   if (dev->flags & IFF_UP) dev->queue_xmit(skb, dev, sk->priority);
     else kfree_skb(skb, FREE_WRITE);
   return(len);
@@ -198,6 +193,7 @@ packet_recvfrom(struct sock *sk, unsigned char *to, int len,
   int copied=0;
   struct sk_buff *skb;
   struct sockaddr *saddr;
+  int err;
 
   saddr = (struct sockaddr *)sin;
   if (len == 0) return(0);
@@ -205,40 +201,21 @@ packet_recvfrom(struct sock *sk, unsigned char *to, int len,
 
   if (sk->shutdown & RCV_SHUTDOWN) return(0);
   if (addr_len) {
-	  verify_area(VERIFY_WRITE, addr_len, sizeof(*addr_len));
+	  err=verify_area(VERIFY_WRITE, addr_len, sizeof(*addr_len));
+	  if(err)
+	  	return err;
 	  put_fs_long(sizeof(*saddr), addr_len);
   }
-  sk->inuse = 1;
-  while (sk->rqueue == NULL) {
-	if (noblock) {
-		release_sock(sk);
-		return(-EAGAIN);
-	}
-	release_sock(sk);
-	cli();
-	if (sk->rqueue == NULL) {
-		interruptible_sleep_on(sk->sleep);
-		if (current->signal & ~current->blocked) {
-			return(-ERESTARTSYS);
-		}
-	}
-	sk->inuse = 1;
-	sti();
-  }
-  skb = sk->rqueue;
-
-  if (!(flags & MSG_PEEK)) {
-	if (skb->next == skb) {
-		sk->rqueue = NULL;
-	} else {
-		sk->rqueue = (struct sk_buff *)sk->rqueue ->next;
-		skb->prev->next = skb->next;
-		skb->next->prev = skb->prev;
-	}
-  }
+  
+  err=verify_area(VERIFY_WRITE,to,len);
+  if(err)
+  	return err;
+  skb=skb_recv_datagram(sk,flags,noblock,&err);
+  if(skb==NULL)
+  	return err;
   copied = min(len, skb->len);
-  verify_area(VERIFY_WRITE, to, copied);
-  memcpy_tofs(to, skb+1, copied);
+
+  memcpy_tofs(to, skb->data, copied);	/* Don't use skb_copy_datagram here: We can't get frag chains */
 
   /* Copy the address. */
   if (saddr) {
@@ -250,9 +227,7 @@ packet_recvfrom(struct sock *sk, unsigned char *to, int len,
 	memcpy_tofs(saddr, &addr, sizeof(*saddr));
   }
 
-  if (!(flags & MSG_PEEK)) {
-	kfree_skb(skb, FREE_READ);
-  }
+  skb_free_datagram(skb);		/* Its either been used up, or its a peek_copy anyway */
 
   release_sock(sk);
   return(copied);
@@ -287,9 +262,11 @@ struct proto packet_prot = {
   NULL,
   NULL,
   NULL, 
-  udp_select,
+  datagram_select,
   NULL,
   packet_init,
+  NULL,
+  NULL,	/* No set/get socket options */
   NULL,
   128,
   0,

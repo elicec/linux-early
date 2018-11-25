@@ -52,7 +52,7 @@ struct msginfo {
 };
 
 #define MSGMNI   128   /* <= 1K */     /* max # of msg queue identifiers */
-#define MSGMAX  4080   /* <= 4080 */   /* max size of message (bytes) */
+#define MSGMAX  4056   /* <= 4056 */   /* max size of message (bytes) */
 #define MSGMNB 16384   /* ? */        /* default max size of a message queue */
 
 /* unused */
@@ -60,7 +60,8 @@ struct msginfo {
 #define MSGTQL  MSGMNB            /* number of system message headers */
 #define MSGMAP  MSGMNB            /* number of entries in message map */
 #define MSGSSZ  16                /* message segment size */
-#define MSGSEG ((MSGPOOL*1024)/ MSGSSZ) /* max no. of segments */
+#define __MSGSEG ((MSGPOOL*1024)/ MSGSSZ) /* max no. of segments */
+#define MSGSEG (__MSGSEG <= 0xffff ? __MSGSEG : 0xffff)
 
 #ifdef __KERNEL__
 

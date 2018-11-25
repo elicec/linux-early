@@ -15,6 +15,9 @@
  *		Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *
+ * Fixes:
+ *		Dmitry Gorodchanin	-	proc locking
+ *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
  *		as published by the Free Software Foundation; either version
@@ -22,14 +25,12 @@
  */
 
 
-#define AF_UNIX_MAJOR	17		/* UNIX VFS major number	*/
-
-
 #ifdef _LINUX_UN_H
 
 
 struct unix_proto_data {
 	int		refcnt;		/* cnt of reference 0=free	*/
+					/* -1=not initialised	-bgm	*/
 	struct socket	*socket;	/* socket we're bound to	*/
 	int		protocol;
 	struct sockaddr_un	sockaddr_un;
@@ -38,6 +39,8 @@ struct unix_proto_data {
 	int		bp_head, bp_tail;
 	struct inode	*inode;
 	struct unix_proto_data	*peerupd;
+	struct wait_queue *wait;	/* Lock across page faults (FvK) */
+	int		lock_flag;
 };
 
 extern struct unix_proto_data unix_datas[NSOCKETS];

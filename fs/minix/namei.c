@@ -185,7 +185,6 @@ static int minix_add_entry(struct inode * dir,
 			de->inode = 0;
 			dir->i_size = block*bh->b_size + offset;
 			dir->i_dirt = 1;
-			dir->i_ctime = CURRENT_TIME;
 		}
 		if (de->inode) {
 			if (namecompare(namelen, info->s_namelen, name, de->name)) {
@@ -286,7 +285,6 @@ int minix_mknod(struct inode * dir, const char * name, int len, int mode, int rd
 		init_fifo(inode);
 	if (S_ISBLK(mode) || S_ISCHR(mode))
 		inode->i_rdev = rdev;
-	inode->i_mtime = inode->i_atime = CURRENT_TIME;
 	inode->i_dirt = 1;
 	error = minix_add_entry(dir, name, len, &bh, &de);
 	if (error) {
@@ -334,7 +332,6 @@ int minix_mkdir(struct inode * dir, const char * name, int len, int mode)
 	}
 	inode->i_op = &minix_dir_inode_operations;
 	inode->i_size = 2 * info->s_dirsize;
-	inode->i_mtime = inode->i_atime = CURRENT_TIME;
 	dir_block = minix_bread(inode,0,1);
 	if (!dir_block) {
 		iput(dir);
@@ -461,6 +458,10 @@ int minix_rmdir(struct inode * dir, const char * name, int len)
 		retval = -ENOTEMPTY;
 		goto end_rmdir;
 	}
+	if (de->inode != inode->i_ino) {
+		retval = -ENOENT;
+		goto end_rmdir;
+	}
 	if (inode->i_count > 1) {
 		retval = -EBUSY;
 		goto end_rmdir;
@@ -472,7 +473,7 @@ int minix_rmdir(struct inode * dir, const char * name, int len)
 	inode->i_nlink=0;
 	inode->i_dirt=1;
 	dir->i_nlink--;
-	dir->i_ctime = dir->i_mtime = CURRENT_TIME;
+	inode->i_ctime = dir->i_ctime = dir->i_mtime = CURRENT_TIME;
 	dir->i_dirt=1;
 	retval = 0;
 end_rmdir:
@@ -497,6 +498,9 @@ repeat:
 		goto end_unlink;
 	if (!(inode = iget(dir->i_sb, de->inode)))
 		goto end_unlink;
+	retval = -EPERM;
+	if (S_ISDIR(inode->i_mode))
+		goto end_unlink;
 	if (de->inode != inode->i_ino) {
 		iput(inode);
 		brelse(bh);
@@ -504,15 +508,16 @@ repeat:
 		schedule();
 		goto repeat;
 	}
-	retval = -EPERM;
 	if ((dir->i_mode & S_ISVTX) && !suser() &&
 	    current->euid != inode->i_uid &&
 	    current->euid != dir->i_uid)
 		goto end_unlink;
-	if (S_ISDIR(inode->i_mode))
+	if (de->inode != inode->i_ino) {
+		retval = -ENOENT;
 		goto end_unlink;
+	}
 	if (!inode->i_nlink) {
-		printk("Deleting nonexistent file (%04x:%d), %d\n",
+		printk("Deleting nonexistent file (%04x:%lu), %d\n",
 			inode->i_dev,inode->i_ino,inode->i_nlink);
 		inode->i_nlink=1;
 	}
@@ -521,7 +526,7 @@ repeat:
 	dir->i_ctime = dir->i_mtime = CURRENT_TIME;
 	dir->i_dirt = 1;
 	inode->i_nlink--;
-	inode->i_ctime = CURRENT_TIME;
+	inode->i_ctime = dir->i_ctime;
 	inode->i_dirt = 1;
 	retval = 0;
 end_unlink:
@@ -689,7 +694,7 @@ start_up:
 	retval = -ENOENT;
 	if (!old_bh)
 		goto end_rename;
-	old_inode = iget(old_dir->i_sb, old_de->inode);
+	old_inode = __iget(old_dir->i_sb, old_de->inode,0); /* don't cross mnt-points */
 	if (!old_inode)
 		goto end_rename;
 	retval = -EPERM;
@@ -699,7 +704,7 @@ start_up:
 		goto end_rename;
 	new_bh = minix_find_entry(new_dir,new_name,new_len,&new_de);
 	if (new_bh) {
-		new_inode = iget(new_dir->i_sb, new_de->inode);
+		new_inode = __iget(new_dir->i_sb, new_de->inode, 0);
 		if (!new_inode) {
 			brelse(new_bh);
 			new_bh = NULL;
@@ -760,8 +765,13 @@ start_up:
 /* ok, that's it */
 	old_de->inode = 0;
 	new_de->inode = old_inode->i_ino;
+	old_dir->i_ctime = old_dir->i_mtime = CURRENT_TIME;
+	old_dir->i_dirt = 1;
+	new_dir->i_ctime = new_dir->i_mtime = CURRENT_TIME;
+	new_dir->i_dirt = 1;
 	if (new_inode) {
 		new_inode->i_nlink--;
+		new_inode->i_ctime = CURRENT_TIME;
 		new_inode->i_dirt = 1;
 	}
 	old_bh->b_dirt = 1;

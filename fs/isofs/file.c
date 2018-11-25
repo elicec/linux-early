@@ -21,7 +21,7 @@
 
 #include <linux/dirent.h>
 
-#define	NBUF	16
+#define	NBUF	32
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
 #define MAX(a,b) (((a)>(b))?(a):(b))
@@ -216,6 +216,9 @@ static int isofs_file_read(struct inode * inode, struct file * filp, char * buf,
 		  if (*bhe) {/* test for valid buffer */
 		    wait_on_buffer(*bhe);
 		    if (!(*bhe)->b_uptodate) {
+		      brelse(*bhe);
+		      if (++bhe == &buflist[NBUF])
+			bhe = buflist;
 		      left = 0;
 		      break;
 		    }

@@ -75,6 +75,8 @@ signal		= 12
 blocked		= 16
 flags		= 20
 errno		= 24
+dbgreg6		= 52
+dbgreg7		= 56
 
 ENOSYS = 38
 
@@ -104,10 +106,15 @@ ENOSYS = 38
 	mov %dx,%ds; \
 	mov %dx,%es; \
 	movl $(USER_DS),%edx; \
-	mov %dx,%fs
+	mov %dx,%fs;
 
 #define RESTORE_ALL \
-	popl %ebx; \
+	cmpw $(KERNEL_CS),CS(%esp); \
+	je 1f;   \
+	movl _current,%eax; \
+	movl dbgreg7(%eax),%ebx; \
+	movl %ebx,%db7;	\
+1:	popl %ebx; \
 	popl %ecx; \
 	popl %edx; \
 	popl %esi; \
@@ -161,6 +168,8 @@ _system_call:
 	movl _current,%ebx
 	andl $~CF_MASK,EFLAGS(%esp)	# clear carry - assume no errors
 	movl $0,errno(%ebx)
+	movl %db6,%edx
+	movl %edx,dbgreg6(%ebx)  # save current hardware debugging status
 	testb $0x20,flags(%ebx)		# PF_TRACESYS
 	jne 1f
 	call _sys_call_table(,%eax,4)
@@ -194,10 +203,8 @@ ret_from_sys_call:
 9:	movl EFLAGS(%esp),%eax		# check VM86 flag: CS/SS are
 	testl $(VM_MASK),%eax		# different then
 	jne 1f
-	cmpw $(USER_CS),CS(%esp)	# was old code segment supervisor ?
-	jne 2f
-	cmpw $(USER_DS),OLDSS(%esp)	# was stack segment user segment ?
-	jne 2f
+	cmpw $(KERNEL_CS),CS(%esp)	# was old code segment supervisor ?
+	je 2f
 1:	sti
 	orl $(IF_MASK),%eax		# these just try to make sure
 	andl $~NT_MASK,%eax		# the program doesn't do anything
@@ -255,6 +262,8 @@ error_code:
 	pushl %edx
 	pushl %ecx
 	pushl %ebx
+	movl $0,%eax
+	movl %eax,%db7			# disable hardware debugging...
 	cld
 	movl $-1, %eax
 	xchgl %eax, ORIG_EAX(%esp)	# orig_eax (get the error code. )
@@ -269,6 +278,11 @@ error_code:
 	mov %dx,%es
 	movl $(USER_DS),%edx
 	mov %dx,%fs
+	pushl %eax
+	movl _current,%eax
+	movl %db6,%edx
+	movl %edx,dbgreg6(%eax)  # save current hardware debugging status
+	popl %eax
 	call *%ebx
 	addl $8,%esp
 	jmp ret_from_sys_call

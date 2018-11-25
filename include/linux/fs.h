@@ -6,11 +6,13 @@
  * structures etc.
  */
 
+#include <linux/linkage.h>
 #include <linux/limits.h>
 #include <linux/wait.h>
 #include <linux/types.h>
 #include <linux/dirent.h>
 #include <linux/vfs.h>
+#include <linux/net.h>
 
 /*
  * It's silly to have NR_OPEN bigger than NR_FILE, but I'll fix
@@ -28,34 +30,9 @@
 #define NR_SUPER 32
 #define NR_HASH 997
 #define NR_IHASH 131
-#define NR_FILE_LOCKS 32
+#define NR_FILE_LOCKS 64
 #define BLOCK_SIZE 1024
 #define BLOCK_SIZE_BITS 10
-#define MAX_CHRDEV 32
-#define MAX_BLKDEV 32
-
-/* devices are as follows: (same as minix, so we can use the minix
- * file system. These are major numbers.)
- *
- *  0 - unnamed (minor 0 = true nodev)
- *  1 - /dev/mem
- *  2 - /dev/fd
- *  3 - /dev/hd
- *  4 - /dev/ttyx
- *  5 - /dev/tty
- *  6 - /dev/lp
- *  7 -
- *  8 - /dev/sd
- *  9 - /dev/st
- * 10 - mice
- * 11 - scsi cdrom
- * 12 -
- * 13 -
- * 14 - sound card (?)
- * 15 -
- */
-
-#define UNNAMED_MAJOR 0
 
 #define MAY_EXEC 1
 #define MAY_WRITE 2
@@ -70,8 +47,9 @@ extern void buffer_init(void);
 extern unsigned long inode_init(unsigned long start, unsigned long end);
 extern unsigned long file_table_init(unsigned long start, unsigned long end);
 
-#define MAJOR(a) (((unsigned)(a))>>8)
-#define MINOR(a) ((a)&0xff)
+#define MAJOR(a) (int)((unsigned short)(a) >> 8)
+#define MINOR(a) (int)((unsigned short)(a) & 0xFF)
+#define MKDEV(a,b) ((int)((((a) & 0xff) << 8) | ((b) & 0xff)))
 
 #ifndef NULL
 #define NULL ((void *) 0)
@@ -124,6 +102,17 @@ extern unsigned long file_table_init(unsigned long start, unsigned long end);
 #define BLKROGET 4702 /* get read-only status (0 = read_write) */
 #define BLKRRPART 4703 /* re-read partition table */
 #define BLKGETSIZE 4704 /* return device size */
+#define BLKFLSBUF 4705 /* flush buffer cache */
+
+/* These are a few other constants  only used by scsi  devices */
+
+#define SCSI_IOCTL_GET_IDLUN 0x5382
+
+/* Used to turn on and off tagged queueing for scsi devices */
+
+#define SCSI_IOCTL_TAGGED_ENABLE 0x5383
+#define SCSI_IOCTL_TAGGED_DISABLE 0x5384
+
 
 #define BMAP_IOCTL 1	/* obsolete - kept for compatibility */
 #define FIBMAP	   1	/* bmap access */
@@ -161,10 +150,12 @@ struct buffer_head {
 #include <linux/minix_fs_i.h>
 #include <linux/ext_fs_i.h>
 #include <linux/ext2_fs_i.h>
+#include <linux/hpfs_fs_i.h>
 #include <linux/msdos_fs_i.h>
 #include <linux/iso_fs_i.h>
 #include <linux/nfs_fs_i.h>
 #include <linux/xia_fs_i.h>
+#include <linux/sysv_fs_i.h>
 
 struct inode {
 	dev_t		i_dev;
@@ -180,6 +171,7 @@ struct inode {
 	time_t		i_ctime;
 	unsigned long	i_blksize;
 	unsigned long	i_blocks;
+	struct semaphore i_sem;
 	struct inode_operations * i_op;
 	struct super_block * i_sb;
 	struct wait_queue * i_wait;
@@ -188,12 +180,13 @@ struct inode {
 	struct inode * i_next, * i_prev;
 	struct inode * i_hash_next, * i_hash_prev;
 	struct inode * i_bound_to, * i_bound_by;
+	struct inode * i_mount;
+	struct socket * i_socket;
 	unsigned short i_count;
 	unsigned short i_flags;
 	unsigned char i_lock;
 	unsigned char i_dirt;
 	unsigned char i_pipe;
-	unsigned char i_mount;
 	unsigned char i_seek;
 	unsigned char i_update;
 	union {
@@ -201,10 +194,12 @@ struct inode {
 		struct minix_inode_info minix_i;
 		struct ext_inode_info ext_i;
 		struct ext2_inode_info ext2_i;
+		struct hpfs_inode_info hpfs_i;
 		struct msdos_inode_info msdos_i;
 		struct iso_inode_info isofs_i;
 		struct nfs_inode_info nfs_i;
 		struct xiafs_inode_info xiafs_i;
+		struct sysv_inode_info sysv_i;
 	} u;
 };
 
@@ -223,6 +218,7 @@ struct file {
 struct file_lock {
 	struct file_lock *fl_next;	/* singly linked list */
 	struct task_struct *fl_owner;	/* NULL if on free list, for sanity checks */
+        unsigned int fl_fd;             /* File descriptor for this lock */
 	struct wait_queue *fl_wait;
 	char fl_type;
 	char fl_whence;
@@ -233,10 +229,12 @@ struct file_lock {
 #include <linux/minix_fs_sb.h>
 #include <linux/ext_fs_sb.h>
 #include <linux/ext2_fs_sb.h>
+#include <linux/hpfs_fs_sb.h>
 #include <linux/msdos_fs_sb.h>
 #include <linux/iso_fs_sb.h>
 #include <linux/nfs_fs_sb.h>
 #include <linux/xia_fs_sb.h>
+#include <linux/sysv_fs_sb.h>
 
 struct super_block {
 	dev_t s_dev;
@@ -256,10 +254,12 @@ struct super_block {
 		struct minix_sb_info minix_sb;
 		struct ext_sb_info ext_sb;
 		struct ext2_sb_info ext2_sb;
+		struct hpfs_sb_info hpfs_sb;
 		struct msdos_sb_info msdos_sb;
 		struct isofs_sb_info isofs_sb;
 		struct nfs_sb_info nfs_sb;
 		struct xiafs_sb_info xiafs_sb;
+		struct sysv_sb_info sysv_sb;
 	} u;
 };
 
@@ -302,7 +302,7 @@ struct super_operations {
 	void (*put_super) (struct super_block *);
 	void (*write_super) (struct super_block *);
 	void (*statfs) (struct super_block *, struct statfs *);
-	int (*remount_fs) (struct super_block *, int *);
+	int (*remount_fs) (struct super_block *, int *, char *);
 };
 
 struct file_system_type {
@@ -313,25 +313,30 @@ struct file_system_type {
 
 #ifdef __KERNEL__
 
-extern "C" int sys_open(const char *, int, int);
-extern "C" int sys_close(unsigned int);		/* yes, it's really unsigned */
+asmlinkage int sys_open(const char *, int, int);
+asmlinkage int sys_close(unsigned int);		/* yes, it's really unsigned */
 
 extern int getname(const char * filename, char **result);
 extern void putname(char * name);
 
 extern int register_blkdev(unsigned int, const char *, struct file_operations *);
+extern int unregister_blkdev(unsigned int major, const char * name);
 extern int blkdev_open(struct inode * inode, struct file * filp);
 extern struct file_operations def_blk_fops;
 extern struct inode_operations blkdev_inode_operations;
 
 extern int register_chrdev(unsigned int, const char *, struct file_operations *);
+extern int unregister_chrdev(unsigned int major, const char * name);
 extern int chrdev_open(struct inode * inode, struct file * filp);
 extern struct file_operations def_chr_fops;
 extern struct inode_operations chrdev_inode_operations;
 
 extern void init_fifo(struct inode * inode);
 
-extern struct file_operations connecting_pipe_fops;
+extern struct file_operations connecting_fifo_fops;
+extern struct file_operations read_fifo_fops;
+extern struct file_operations write_fifo_fops;
+extern struct file_operations rdwr_fifo_fops;
 extern struct file_operations read_pipe_fops;
 extern struct file_operations write_pipe_fops;
 extern struct file_operations rdwr_pipe_fops;
@@ -346,7 +351,6 @@ extern struct file *first_file;
 extern int nr_files;
 extern struct super_block super_blocks[NR_SUPER];
 
-extern void grow_buffers(int size);
 extern int shrink_buffers(unsigned int priority);
 
 extern int nr_buffers;
@@ -370,6 +374,7 @@ extern int open_namei(const char * pathname, int flag, int mode,
 	struct inode ** res_inode, struct inode * base);
 extern int do_mknod(const char * filename, int mode, dev_t dev);
 extern void iput(struct inode * inode);
+extern struct inode * __iget(struct super_block * sb,int nr,int crsmnt);
 extern struct inode * iget(struct super_block * sb,int nr);
 extern struct inode * get_empty_inode(void);
 extern void insert_inode_hash(struct inode *);
@@ -389,6 +394,7 @@ extern struct buffer_head * breada(dev_t dev,int block,...);
 extern void put_super(dev_t dev);
 extern dev_t ROOT_DEV;
 
+extern void show_buffers(void);
 extern void mount_root(void);
 
 extern int char_read(struct inode *, struct file *, char *, int);

@@ -4,11 +4,10 @@
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
+#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
-#include <linux/tty.h>
 #include <linux/kernel.h>
-#include <linux/config.h>
 #include <linux/times.h>
 #include <linux/utsname.h>
 #include <linux/param.h>
@@ -16,6 +15,8 @@
 #include <linux/signal.h>
 #include <linux/string.h>
 #include <linux/ptrace.h>
+#include <linux/stat.h>
+#include <linux/mman.h>
 
 #include <asm/segment.h>
 #include <asm/io.h>
@@ -25,13 +26,6 @@
  */
 static int C_A_D = 1;
 
-/* 
- * The timezone where the local system is located.  Used as a default by some
- * programs who obtain this value by using gettimeofday.
- */
-struct timezone sys_tz = { 0, 0};
-
-extern int session_of_pgrp(int pgrp);
 extern void adjust_clock(void);
 
 #define	PZERO	15
@@ -55,7 +49,7 @@ static int proc_sel(struct task_struct *p, int which, int who)
 	return 0;
 }
 
-extern "C" int sys_setpriority(int which, int who, int niceval)
+asmlinkage int sys_setpriority(int which, int who, int niceval)
 {
 	struct task_struct **p;
 	int error = ESRCH;
@@ -85,7 +79,7 @@ extern "C" int sys_setpriority(int which, int who, int niceval)
 	return -error;
 }
 
-extern "C" int sys_getpriority(int which, int who)
+asmlinkage int sys_getpriority(int which, int who)
 {
 	struct task_struct **p;
 	int max_prio = 0;
@@ -102,37 +96,37 @@ extern "C" int sys_getpriority(int which, int who)
 	return(max_prio ? max_prio : -ESRCH);
 }
 
-extern "C" int sys_profil(void)
+asmlinkage int sys_profil(void)
 {
 	return -ENOSYS;
 }
 
-extern "C" int sys_ftime(void)
+asmlinkage int sys_ftime(void)
 {
 	return -ENOSYS;
 }
 
-extern "C" int sys_break(void)
+asmlinkage int sys_break(void)
 {
 	return -ENOSYS;
 }
 
-extern "C" int sys_stty(void)
+asmlinkage int sys_stty(void)
 {
 	return -ENOSYS;
 }
 
-extern "C" int sys_gtty(void)
+asmlinkage int sys_gtty(void)
 {
 	return -ENOSYS;
 }
 
-extern "C" int sys_prof(void)
+asmlinkage int sys_prof(void)
 {
 	return -ENOSYS;
 }
 
-extern "C" unsigned long save_v86_state(struct vm86_regs * regs)
+asmlinkage unsigned long save_v86_state(struct vm86_regs * regs)
 {
 	unsigned long stack;
 
@@ -156,7 +150,7 @@ static void mark_screen_rdonly(struct task_struct * tsk)
 	if ((tmp = tsk->tss.cr3) != 0) {
 		tmp = *(unsigned long *) tmp;
 		if (tmp & PAGE_PRESENT) {
-			tmp &= 0xfffff000;
+			tmp &= PAGE_MASK;
 			pg_table = (0xA0000 >> PAGE_SHIFT) + (unsigned long *) tmp;
 			tmp = 32;
 			while (tmp--) {
@@ -168,7 +162,7 @@ static void mark_screen_rdonly(struct task_struct * tsk)
 	}
 }
 
-extern "C" int sys_vm86(struct vm86_struct * v86)
+asmlinkage int sys_vm86(struct vm86_struct * v86)
 {
 	struct vm86_struct info;
 	struct pt_regs * pt_regs = (struct pt_regs *) &v86;
@@ -189,7 +183,7 @@ extern "C" int sys_vm86(struct vm86_struct * v86)
  * inherited from protected mode.
  */
 	info.regs.eflags &= 0x00000dd5;
-	info.regs.eflags |= 0xfffff22a & pt_regs->eflags;
+	info.regs.eflags |= ~0x00000dd5 & pt_regs->eflags;
 	info.regs.eflags |= VM_MASK;
 	current->saved_kernel_stack = current->tss.esp0;
 	current->tss.esp0 = (unsigned long) pt_regs;
@@ -215,7 +209,7 @@ extern void hard_reset_now(void);
  *
  * reboot doesn't sync: do that yourself before calling this.
  */
-extern "C" int sys_reboot(int magic, int magic_too, int flag)
+asmlinkage int sys_reboot(int magic, int magic_too, int flag)
 {
 	if (!suser())
 		return -EPERM;
@@ -257,7 +251,7 @@ void ctrl_alt_del(void)
  * 100% compatible with BSD.  A program which uses just setgid() will be
  * 100% compatible with POSIX w/ Saved ID's. 
  */
-extern "C" int sys_setregid(gid_t rgid, gid_t egid)
+asmlinkage int sys_setregid(gid_t rgid, gid_t egid)
 {
 	int old_rgid = current->gid;
 
@@ -286,7 +280,7 @@ extern "C" int sys_setregid(gid_t rgid, gid_t egid)
 /*
  * setgid() is implemeneted like SysV w/ SAVED_IDS 
  */
-extern "C" int sys_setgid(gid_t gid)
+asmlinkage int sys_setgid(gid_t gid)
 {
 	if (suser())
 		current->gid = current->egid = current->sgid = gid;
@@ -297,48 +291,34 @@ extern "C" int sys_setgid(gid_t gid)
 	return 0;
 }
 
-extern "C" int sys_acct(void)
+asmlinkage int sys_acct(void)
 {
 	return -ENOSYS;
 }
 
-extern "C" int sys_phys(void)
+asmlinkage int sys_phys(void)
 {
 	return -ENOSYS;
 }
 
-extern "C" int sys_lock(void)
+asmlinkage int sys_lock(void)
 {
 	return -ENOSYS;
 }
 
-extern "C" int sys_mpx(void)
+asmlinkage int sys_mpx(void)
 {
 	return -ENOSYS;
 }
 
-extern "C" int sys_ulimit(void)
+asmlinkage int sys_ulimit(void)
 {
 	return -ENOSYS;
 }
 
-extern "C" int sys_old_syscall(void)
+asmlinkage int sys_old_syscall(void)
 {
 	return -ENOSYS;
-}
-
-extern "C" int sys_time(long * tloc)
-{
-	int i, error;
-
-	i = CURRENT_TIME;
-	if (tloc) {
-		error = verify_area(VERIFY_WRITE, tloc, 4);
-		if (error)
-			return error;
-		put_fs_long(i,(unsigned long *)tloc);
-	}
-	return i;
 }
 
 /*
@@ -354,7 +334,7 @@ extern "C" int sys_time(long * tloc)
  * 100% compatible with BSD.  A program which uses just setuid() will be
  * 100% compatible with POSIX w/ Saved ID's. 
  */
-extern "C" int sys_setreuid(uid_t ruid, uid_t euid)
+asmlinkage int sys_setreuid(uid_t ruid, uid_t euid)
 {
 	int old_ruid = current->uid;
 	
@@ -391,7 +371,7 @@ extern "C" int sys_setreuid(uid_t ruid, uid_t euid)
  * will allow a root program to temporarily drop privileges and be able to
  * regain them by swapping the real and effective uid.  
  */
-extern "C" int sys_setuid(uid_t uid)
+asmlinkage int sys_setuid(uid_t uid)
 {
 	if (suser())
 		current->uid = current->euid = current->suid = uid;
@@ -402,16 +382,7 @@ extern "C" int sys_setuid(uid_t uid)
 	return(0);
 }
 
-extern "C" int sys_stime(long * tptr)
-{
-	if (!suser())
-		return -EPERM;
-	startup_time = get_fs_long((unsigned long *)tptr) - jiffies/HZ;
-	jiffies_offset = 0;
-	return 0;
-}
-
-extern "C" int sys_times(struct tms * tbuf)
+asmlinkage int sys_times(struct tms * tbuf)
 {
 	if (tbuf) {
 		int error = verify_area(VERIFY_WRITE,tbuf,sizeof *tbuf);
@@ -425,7 +396,7 @@ extern "C" int sys_times(struct tms * tbuf)
 	return jiffies;
 }
 
-extern "C" int sys_brk(unsigned long brk)
+asmlinkage int sys_brk(unsigned long brk)
 {
 	int freepages;
 	unsigned long rlim;
@@ -433,14 +404,17 @@ extern "C" int sys_brk(unsigned long brk)
 
 	if (brk < current->end_code)
 		return current->brk;
-	newbrk = (brk + 0x00000fff) & 0xfffff000;
-	oldbrk = (current->brk + 0x00000fff) & 0xfffff000;
+	newbrk = PAGE_ALIGN(brk);
+	oldbrk = PAGE_ALIGN(current->brk);
+	if (oldbrk == newbrk)
+		return current->brk = brk;
+
 	/*
 	 * Always allow shrinking brk
 	 */
 	if (brk <= current->brk) {
 		current->brk = brk;
-		unmap_page_range(newbrk, oldbrk-newbrk);
+		do_munmap(newbrk, oldbrk-newbrk);
 		return brk;
 	}
 	/*
@@ -448,7 +422,7 @@ extern "C" int sys_brk(unsigned long brk)
 	 */
 	rlim = current->rlim[RLIMIT_DATA].rlim_cur;
 	if (rlim >= RLIM_INFINITY)
-		rlim = 0xffffffff;
+		rlim = ~0;
 	if (brk - current->end_code > rlim || brk >= current->start_stack - 16384)
 		return current->brk;
 	/*
@@ -473,7 +447,9 @@ extern "C" int sys_brk(unsigned long brk)
 	 * Ok, we have probably got enough memory - let it rip.
 	 */
 	current->brk = brk;
-	zeromap_page_range(oldbrk, newbrk-oldbrk, PAGE_COPY);
+	do_mmap(NULL, oldbrk, newbrk-oldbrk,
+		PROT_READ|PROT_WRITE|PROT_EXEC,
+		MAP_FIXED|MAP_PRIVATE, 0);
 	return brk;
 }
 
@@ -485,41 +461,72 @@ extern "C" int sys_brk(unsigned long brk)
  * OK, I think I have the protection semantics right.... this is really
  * only important on a multi-user system anyway, to make sure one user
  * can't send a signal to a process owned by another.  -TYT, 12/12/91
+ *
+ * Auch. Had to add the 'did_exec' flag to conform completely to POSIX.
+ * LBT 04.03.94
  */
-extern "C" int sys_setpgid(pid_t pid, pid_t pgid)
+asmlinkage int sys_setpgid(pid_t pid, pid_t pgid)
 {
-	int i; 
+	struct task_struct * p;
 
 	if (!pid)
 		pid = current->pid;
 	if (!pgid)
-		pgid = current->pid;
+		pgid = pid;
 	if (pgid < 0)
 		return -EINVAL;
-	for (i=0 ; i<NR_TASKS ; i++)
-		if (task[i] && (task[i]->pid == pid) &&
-		    ((task[i]->p_pptr == current) || 
-		     (task[i] == current))) {
-			if (task[i]->leader)
-				return -EPERM;
-			if ((task[i]->session != current->session) ||
-			    ((pgid != pid) && 
-			     (session_of_pgrp(pgid) != current->session)))
-				return -EPERM;
-			task[i]->pgrp = pgid;
-			return 0;
+	for_each_task(p) {
+		if (p->pid == pid)
+			goto found_task;
+	}
+	return -ESRCH;
+
+found_task:
+	if (p->p_pptr == current || p->p_opptr == current) {
+		if (p->session != current->session)
+			return -EPERM;
+		if (p->did_exec)
+			return -EACCES;
+	} else if (p != current)
+		return -ESRCH;
+	if (p->leader)
+		return -EPERM;
+	if (pgid != pid) {
+		struct task_struct * tmp;
+		for_each_task (tmp) {
+			if (tmp->pgrp == pgid &&
+			 tmp->session == current->session)
+				goto ok_pgid;
 		}
+		return -EPERM;
+	}
+
+ok_pgid:
+	p->pgrp = pgid;
+	return 0;
+}
+
+asmlinkage int sys_getpgid(pid_t pid)
+{
+	struct task_struct * p;
+
+	if (!pid)
+		return current->pgrp;
+	for_each_task(p) {
+		if (p->pid == pid)
+			return p->pgrp;
+	}
 	return -ESRCH;
 }
 
-extern "C" int sys_getpgrp(void)
+asmlinkage int sys_getpgrp(void)
 {
 	return current->pgrp;
 }
 
-extern "C" int sys_setsid(void)
+asmlinkage int sys_setsid(void)
 {
-	if (current->leader && !suser())
+	if (current->leader)
 		return -EPERM;
 	current->leader = 1;
 	current->session = current->pgrp = current->pid;
@@ -530,7 +537,7 @@ extern "C" int sys_setsid(void)
 /*
  * Supplementary group ID's
  */
-extern "C" int sys_getgroups(int gidsetsize, gid_t *grouplist)
+asmlinkage int sys_getgroups(int gidsetsize, gid_t *grouplist)
 {
 	int i;
 
@@ -550,7 +557,7 @@ extern "C" int sys_getgroups(int gidsetsize, gid_t *grouplist)
 	return(i);
 }
 
-extern "C" int sys_setgroups(int gidsetsize, gid_t *grouplist)
+asmlinkage int sys_setgroups(int gidsetsize, gid_t *grouplist)
 {
 	int	i;
 
@@ -582,7 +589,7 @@ int in_group_p(gid_t grp)
 	return 0;
 }
 
-extern "C" int sys_newuname(struct new_utsname * name)
+asmlinkage int sys_newuname(struct new_utsname * name)
 {
 	int error;
 
@@ -594,7 +601,7 @@ extern "C" int sys_newuname(struct new_utsname * name)
 	return error;
 }
 
-extern "C" int sys_uname(struct old_utsname * name)
+asmlinkage int sys_uname(struct old_utsname * name)
 {
 	int error;
 	if (!name)
@@ -615,7 +622,7 @@ extern "C" int sys_uname(struct old_utsname * name)
 	return 0;
 }
 
-extern "C" int sys_olduname(struct oldold_utsname * name)
+asmlinkage int sys_olduname(struct oldold_utsname * name)
 {
 	int error;
 	if (!name)
@@ -639,7 +646,7 @@ extern "C" int sys_olduname(struct oldold_utsname * name)
 /*
  * Only sethostname; gethostname can be implemented by calling uname()
  */
-extern "C" int sys_sethostname(char *name, int len)
+asmlinkage int sys_sethostname(char *name, int len)
 {
 	int	i;
 	
@@ -659,7 +666,7 @@ extern "C" int sys_sethostname(char *name, int len)
  * Only setdomainname; getdomainname can be implemented by calling
  * uname()
  */
-extern "C" int sys_setdomainname(char *name, int len)
+asmlinkage int sys_setdomainname(char *name, int len)
 {
 	int	i;
 	
@@ -675,7 +682,7 @@ extern "C" int sys_setdomainname(char *name, int len)
 	return 0;
 }
 
-extern "C" int sys_getrlimit(unsigned int resource, struct rlimit *rlim)
+asmlinkage int sys_getrlimit(unsigned int resource, struct rlimit *rlim)
 {
 	int error;
 
@@ -691,7 +698,7 @@ extern "C" int sys_getrlimit(unsigned int resource, struct rlimit *rlim)
 	return 0;	
 }
 
-extern "C" int sys_setrlimit(unsigned int resource, struct rlimit *rlim)
+asmlinkage int sys_setrlimit(unsigned int resource, struct rlimit *rlim)
 {
 	struct rlimit new_rlim, *old_rlim;
 
@@ -760,138 +767,17 @@ int getrusage(struct task_struct *p, int who, struct rusage *ru)
 	return 0;
 }
 
-extern "C" int sys_getrusage(int who, struct rusage *ru)
+asmlinkage int sys_getrusage(int who, struct rusage *ru)
 {
 	if (who != RUSAGE_SELF && who != RUSAGE_CHILDREN)
 		return -EINVAL;
 	return getrusage(current, who, ru);
 }
 
-#define LATCH ((1193180 + HZ/2)/HZ)
-
-/*
- * This version of gettimeofday has near microsecond resolution.
- * It was inspired by Steve McCanne's microtime-i386 for BSD.  -- jrs
- */
-static inline void do_gettimeofday(struct timeval *tv)
-{
-	unsigned long nowtime;
-	long count;
-
-#ifdef __i386__
-	cli();
-	/* timer count may underflow right here */
-	outb_p(0x00, 0x43);	/* latch the count ASAP */
-	nowtime = jiffies;	/* must be saved inside cli/sti */
-	count = inb_p(0x40);	/* read the latched count */
-	count |= inb_p(0x40) << 8;
-	/* we know probability of underflow is always MUCH less than 1% */
-	if (count < (LATCH - LATCH/100))
-		sti();
-	else {
-		/* check for pending timer interrupt */
-		outb_p(0x0a, 0x20);
-		if (inb(0x20) & 1)
-			nowtime++;
-		sti();
-	}
-	nowtime += jiffies_offset;
-	tv->tv_sec = startup_time + CT_TO_SECS(nowtime);
-	/* the correction term is always in the range [0, 1) clocktick */
-	tv->tv_usec = CT_TO_USECS(nowtime)
-		+ ((LATCH - 1) - count)*(1000000/HZ)/LATCH;
-#else /* not __i386__ */
-	nowtime = jiffies + jiffes_offset;
-	tv->tv_sec = startup_time + CT_TO_SECS(nowtime);
-	tv->tv_usec = CT_TO_USECS(nowtime);
-#endif /* not __i386__ */
-}
-
-extern "C" int sys_gettimeofday(struct timeval *tv, struct timezone *tz)
-{
-	int error;
-
-	if (tv) {
-		struct timeval ktv;
-		error = verify_area(VERIFY_WRITE, tv, sizeof *tv);
-		if (error)
-			return error;
-		do_gettimeofday(&ktv);
-		put_fs_long(ktv.tv_sec, (unsigned long *) &tv->tv_sec);
-		put_fs_long(ktv.tv_usec, (unsigned long *) &tv->tv_usec);
-	}
-	if (tz) {
-		error = verify_area(VERIFY_WRITE, tz, sizeof *tz);
-		if (error)
-			return error;
-		put_fs_long(sys_tz.tz_minuteswest, (unsigned long *) tz);
-		put_fs_long(sys_tz.tz_dsttime, ((unsigned long *) tz)+1);
-	}
-	return 0;
-}
-
-/*
- * The first time we set the timezone, we will warp the clock so that
- * it is ticking GMT time instead of local time.  Presumably, 
- * if someone is setting the timezone then we are running in an
- * environment where the programs understand about timezones.
- * This should be done at boot time in the /etc/rc script, as
- * soon as possible, so that the clock can be set right.  Otherwise,
- * various programs will get confused when the clock gets warped.
- */
-extern "C" int sys_settimeofday(struct timeval *tv, struct timezone *tz)
-{
-	static int	firsttime = 1;
-
-	if (!suser())
-		return -EPERM;
-	if (tz) {
-		sys_tz.tz_minuteswest = get_fs_long((unsigned long *) tz);
-		sys_tz.tz_dsttime = get_fs_long(((unsigned long *) tz)+1);
-		if (firsttime) {
-			firsttime = 0;
-			if (!tv)
-				adjust_clock();
-		}
-	}
-	if (tv) {
-		int sec, usec;
-
-		sec = get_fs_long((unsigned long *)tv);
-		usec = get_fs_long(((unsigned long *)tv)+1);
-	
-		startup_time = sec - jiffies/HZ;
-		jiffies_offset = usec * HZ / 1000000 - jiffies%HZ;
-	}
-	return 0;
-}
-
-/*
- * Adjust the time obtained from the CMOS to be GMT time instead of
- * local time.
- * 
- * This is ugly, but preferable to the alternatives.  Otherwise we
- * would either need to write a program to do it in /etc/rc (and risk
- * confusion if the program gets run more than once; it would also be 
- * hard to make the program warp the clock precisely n hours)  or
- * compile in the timezone information into the kernel.  Bad, bad....
- *
- * XXX Currently does not adjust for daylight savings time.  May not
- * need to do anything, depending on how smart (dumb?) the BIOS
- * is.  Blast it all.... the best thing to do not depend on the CMOS
- * clock at all, but get the time via NTP or timed if you're on a 
- * network....				- TYT, 1/1/92
- */
-void adjust_clock(void)
-{
-	startup_time += sys_tz.tz_minuteswest*60;
-}
-
-extern "C" int sys_umask(int mask)
+asmlinkage int sys_umask(int mask)
 {
 	int old = current->umask;
 
-	current->umask = mask & 0777;
+	current->umask = mask & S_IRWXUGO;
 	return (old);
 }
-

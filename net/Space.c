@@ -29,11 +29,23 @@
 #ifdef	CONFIG_INET
 #  include "inet/inet.h"
 #endif
+#ifdef CONFIG_IPX
+#include "inet/ipxcall.h"
+#endif
+#ifdef CONFIG_AX25
+#include "inet/ax25call.h"
+#endif
 
 struct ddi_proto protocols[] = {
 #ifdef	CONFIG_UNIX
   { "UNIX",	unix_proto_init	},
 #endif
+#ifdef  CONFIG_IPX
+  { "IPX",	ipx_proto_init },
+#endif
+#ifdef CONFIG_AX25  
+  { "AX.25",	ax25_proto_init },
+#endif  
 #ifdef	CONFIG_INET
   { "INET",	inet_proto_init	},
 #endif
@@ -50,7 +62,7 @@ struct ddi_proto protocols[] = {
  *
  * WARNING:	THIS SECTION IS NOT YET USED BY THE DRIVERS !!!!!
  */
-#include "drv/we8003/we8003.h"		/* Western Digital WD-80[01]3	*/
+/*#include "drv/we8003/we8003.h"	Western Digital WD-80[01]3	*/
 /*#include "drv/dp8390/dp8390.h"	Donald Becker's DP8390 kit	*/
 /*#inclde "drv/slip/slip.h"		Laurence Culhane's SLIP kit	*/
 

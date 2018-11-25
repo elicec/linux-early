@@ -224,7 +224,7 @@ struct super_block *msdos_read_super(struct super_block *s,void *data,
 		    conversion,uid,gid,umask,MSDOS_CAN_BMAP(MSDOS_SB(s)) ?
 		    ",bmap" : "");
 		printk("[me=0x%x,cs=%d,#f=%d,fs=%d,fl=%d,ds=%d,de=%d,data=%d,"
-		    "se=%d,ts=%d,ls=%d]\n",b->media,MSDOS_SB(s)->cluster_size,
+		    "se=%d,ts=%ld,ls=%d]\n",b->media,MSDOS_SB(s)->cluster_size,
 		    MSDOS_SB(s)->fats,MSDOS_SB(s)->fat_start,MSDOS_SB(s)->
 		    fat_length,MSDOS_SB(s)->dir_start,MSDOS_SB(s)->dir_entries,
 		    MSDOS_SB(s)->data_start,CF_LE_W(*(unsigned short *) &b->
@@ -315,7 +315,7 @@ void msdos_read_inode(struct inode *inode)
 	inode->i_uid = MSDOS_SB(inode->i_sb)->fs_uid;
 	inode->i_gid = MSDOS_SB(inode->i_sb)->fs_gid;
 	if (inode->i_ino == MSDOS_ROOT_INO) {
-		inode->i_mode = (0777 & ~MSDOS_SB(inode->i_sb)->fs_umask) |
+		inode->i_mode = (S_IRWXUGO & ~MSDOS_SB(inode->i_sb)->fs_umask) |
 		    S_IFDIR;
 		inode->i_op = &msdos_dir_inode_operations;
 		inode->i_nlink = msdos_subdirs(inode)+2;
@@ -333,13 +333,13 @@ void msdos_read_inode(struct inode *inode)
 	}
 	if (!(bh = bread(inode->i_dev,inode->i_ino >> MSDOS_DPB_BITS,
 	    BLOCK_SIZE))) {
-		printk("dev = 0x%04X, ino = %d\n",inode->i_dev,inode->i_ino);
+		printk("dev = 0x%04X, ino = %ld\n",inode->i_dev,inode->i_ino);
 		panic("msdos_read_inode: unable to read i-node block");
 	}
 	raw_entry = &((struct msdos_dir_entry *) (bh->b_data))
 	    [inode->i_ino & (MSDOS_DPB-1)];
 	if ((raw_entry->attr & ATTR_DIR) && !IS_FREE(raw_entry->name)) {
-		inode->i_mode = MSDOS_MKMODE(raw_entry->attr,0777 &
+		inode->i_mode = MSDOS_MKMODE(raw_entry->attr,S_IRWXUGO &
 		    ~MSDOS_SB(inode->i_sb)->fs_umask) | S_IFDIR;
 		inode->i_op = &msdos_dir_inode_operations;
 		MSDOS_I(inode)->i_start = CF_LE_W(raw_entry->start);
@@ -356,14 +356,16 @@ void msdos_read_inode(struct inode *inode)
 			while (nr != -1) {
 				inode->i_size += SECTOR_SIZE*MSDOS_SB(inode->
 				    i_sb)->cluster_size;
-				if (!(nr = fat_access(inode->i_sb,nr,-1)))
-					printk("Directory %d: bad FAT\n",
+				if (!(nr = fat_access(inode->i_sb,nr,-1))) {
+					printk("Directory %ld: bad FAT\n",
 					    inode->i_ino);
+					break;
+				}
 			}
 	}
 	else {
 		inode->i_mode = MSDOS_MKMODE(raw_entry->attr,(IS_NOEXEC(inode)
-		    ? 0666 : 0777) & ~MSDOS_SB(inode->i_sb)->fs_umask) |
+		    ? S_IRUGO|S_IWUGO : S_IRWXUGO) & ~MSDOS_SB(inode->i_sb)->fs_umask) |
 		    S_IFREG;
 		inode->i_op = MSDOS_CAN_BMAP(MSDOS_SB(inode->i_sb)) ? 
 		    &msdos_file_inode_operations :
@@ -394,7 +396,7 @@ void msdos_write_inode(struct inode *inode)
 	if (inode->i_ino == MSDOS_ROOT_INO || !inode->i_nlink) return;
 	if (!(bh = bread(inode->i_dev,inode->i_ino >> MSDOS_DPB_BITS,
 	    BLOCK_SIZE))) {
-		printk("dev = 0x%04X, ino = %d\n",inode->i_dev,inode->i_ino);
+		printk("dev = 0x%04X, ino = %ld\n",inode->i_dev,inode->i_ino);
 		panic("msdos_write_inode: unable to read i-node block");
 	}
 	raw_entry = &((struct msdos_dir_entry *) (bh->b_data))
@@ -436,10 +438,10 @@ int msdos_notify_change(int flags,struct inode *inode)
 		error = -EPERM;
 	}
 	if (IS_NOEXEC(inode) && !S_ISDIR(inode->i_mode))
-		inode->i_mode &= S_IFMT | 0666;
-	else inode->i_mode |= 0111;
+		inode->i_mode &= S_IFMT | S_IRUGO | S_IWUGO;
+	else inode->i_mode |= S_IXUGO;
 	inode->i_mode = ((inode->i_mode & S_IFMT) | ((((inode->i_mode & S_IRWXU
-	    & ~MSDOS_SB(inode->i_sb)->fs_umask) | S_IRUSR) >> 6)*0111)) &
+	    & ~MSDOS_SB(inode->i_sb)->fs_umask) | S_IRUSR) >> 6)*S_IXUGO)) &
 	    ~MSDOS_SB(inode->i_sb)->fs_umask;
 	return MSDOS_SB(inode->i_sb)->quiet ? 0 : error;
 }

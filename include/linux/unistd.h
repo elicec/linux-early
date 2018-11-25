@@ -123,12 +123,24 @@
 #define __NR_wait4		114
 #define __NR_swapoff		115
 #define __NR_sysinfo		116
-#define __NR_ipc		117	/* not implemented yet */
+#define __NR_ipc		117
 #define __NR_fsync		118
 #define __NR_sigreturn		119
 #define __NR_clone		120
 #define __NR_setdomainname	121
 #define __NR_uname		122
+#define __NR_modify_ldt		123
+#define __NR_adjtimex		124
+#define __NR_mprotect		125
+#define __NR_sigprocmask	126
+#define __NR_create_module	127
+#define __NR_init_module	128
+#define __NR_delete_module	129
+#define __NR_get_kernel_syms	130
+#define __NR_quotactl		131
+#define __NR_getpgid		132
+#define __NR_fchdir		133
+#define __NR_bdflush		134
 
 extern int errno;
 

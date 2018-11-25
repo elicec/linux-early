@@ -10,15 +10,26 @@
  *		Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *
+ * Fixes:
+ *		Alan Cox	:	Verify Area
+ *		NET2E Team	:	Page fault locks
+ *	Dmitry Gorodchanin	:	/proc locking
+ *
+ * To Do:
+ *	Some nice person is looking into Unix sockets done properly. NET3
+ *	will replace all of this and include datagram sockets and socket
+ *	options - so please stop asking me for them 8-)
+ *
+ *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
  *		as published by the Free Software Foundation; either version
  *		2 of the License, or(at your option) any later version.
  */
-#include <asm/system.h>
-#include <asm/segment.h>
+
 #include <linux/config.h>
 #include <linux/kernel.h>
+#include <linux/major.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/errno.h>
@@ -32,9 +43,14 @@
 #include <linux/net.h>
 #include <linux/fs.h>
 #include <linux/ddi.h>
-#include <stdarg.h>
-#include "unix.h"
+#include <linux/malloc.h>
 
+#include <asm/system.h>
+#include <asm/segment.h>
+
+#include <stdarg.h>
+
+#include "unix.h"
 
 struct unix_proto_data unix_datas[NSOCKETS];
 static int unix_debug = 0;
@@ -122,10 +138,33 @@ sockaddr_un_printk(struct sockaddr_un *sockun, int sockaddr_len)
     else {
 	memcpy(buf, sockun->sun_path, sockaddr_len);
 	buf[sockaddr_len] = '\0';
-	printk("\"%s\"[%d]\n", buf, sockaddr_len + UN_PATH_OFFSET);
+	printk("\"%s\"[%lu]\n", buf, sockaddr_len + UN_PATH_OFFSET);
   }
 }
   
+
+/* Support routines doing anti page fault locking 
+ * FvK & Matt Dillon (borrowed From NET2E3)
+ */
+
+/*
+ * Locking for unix-domain sockets.  We don't use the socket structure's
+ * wait queue because it is allowed to 'go away' outside of our control,
+ * whereas unix_proto_data structures stick around.
+ */
+void unix_lock(struct unix_proto_data *upd)
+{
+	while (upd->lock_flag)
+		sleep_on(&upd->wait);
+	upd->lock_flag = 1;
+}
+
+
+void unix_unlock(struct unix_proto_data *upd)
+{
+	upd->lock_flag = 0;
+	wake_up(&upd->wait);
+}
 
 /* don't have to do anything. */
 static int
@@ -199,7 +238,7 @@ unix_data_lookup(struct sockaddr_un *sockun, int sockaddr_len,
   struct unix_proto_data *upd;
 
   for(upd = unix_datas; upd <= last_unix_data; ++upd) {
-	if (upd->refcnt && upd->socket &&
+	if (upd->refcnt > 0 && upd->socket &&
 	    upd->socket->state == SS_UNCONNECTED &&
 	    upd->sockaddr_un.sun_family == sockun->sun_family &&
 	    upd->inode == inode) return(upd);
@@ -216,7 +255,7 @@ unix_data_alloc(void)
   cli();
   for(upd = unix_datas; upd <= last_unix_data; ++upd) {
 	if (!upd->refcnt) {
-		upd->refcnt = 1;
+		upd->refcnt = -1;	/* unix domain socket not yet initialised - bgm */
 		sti();
 		upd->socket = NULL;
 		upd->sockaddr_len = 0;
@@ -282,7 +321,7 @@ unix_proto_create(struct socket *sock, int protocol)
 	printk("UNIX: create: can't allocate buffer\n");
 	return(-ENOMEM);
   }
-  if (!(upd->buf =(char *)get_free_page(GFP_USER))) {
+  if (!(upd->buf = (char*) get_free_page(GFP_USER))) {
 	printk("UNIX: create: can't get page!\n");
 	unix_data_deref(upd);
 	return(-ENOMEM);
@@ -290,6 +329,7 @@ unix_proto_create(struct socket *sock, int protocol)
   upd->protocol = protocol;
   upd->socket = sock;
   UN_DATA(sock) = upd;
+  upd->refcnt = 1;	/* Now its complete - bgm */
   dprintf(1, "UNIX: create: allocated data 0x%x\n", upd);
   return(0);
 }
@@ -345,6 +385,7 @@ unix_proto_bind(struct socket *sock, struct sockaddr *umyaddr,
   struct unix_proto_data *upd = UN_DATA(sock);
   unsigned long old_fs;
   int i;
+  int er;
 
   dprintf(1, "UNIX: bind: socket 0x%x, len=%d\n", sock, sockaddr_len);
   if (sockaddr_len <= UN_PATH_OFFSET ||
@@ -356,7 +397,9 @@ unix_proto_bind(struct socket *sock, struct sockaddr *umyaddr,
 	printk("UNIX: bind: already bound!\n");
 	return(-EINVAL);
   }
-  verify_area(VERIFY_WRITE, umyaddr, sockaddr_len);
+  er=verify_area(VERIFY_WRITE, umyaddr, sockaddr_len);
+  if(er)
+  	return er;
   memcpy_fromfs(&upd->sockaddr_un, umyaddr, sockaddr_len);
   upd->sockaddr_un.sun_path[sockaddr_len-UN_PATH_OFFSET] = '\0';
   if (upd->sockaddr_un.sun_family != AF_UNIX) {
@@ -369,7 +412,7 @@ unix_proto_bind(struct socket *sock, struct sockaddr *umyaddr,
   fname[sockaddr_len-UN_PATH_OFFSET] = '\0';
   old_fs = get_fs();
   set_fs(get_ds());
-  i = do_mknod(fname, S_IFSOCK | 0777, 0);
+  i = do_mknod(fname, S_IFSOCK | S_IRWXUGO, 0);
   if (i == 0) i = open_namei(fname, 0, S_IFSOCK, &upd->inode, NULL);
   set_fs(old_fs);
   if (i < 0) {
@@ -400,6 +443,7 @@ unix_proto_connect(struct socket *sock, struct sockaddr *uservaddr,
   struct inode *inode;
   unsigned long old_fs;
   int i;
+  int er;
 
   dprintf(1, "UNIX: connect: socket 0x%x, servlen=%d\n", sock, sockaddr_len);
 
@@ -411,7 +455,9 @@ unix_proto_connect(struct socket *sock, struct sockaddr *uservaddr,
   if (sock->state == SS_CONNECTING) return(-EINPROGRESS);
   if (sock->state == SS_CONNECTED) return(-EISCONN);
 
-  verify_area(VERIFY_WRITE, uservaddr, sockaddr_len);
+  er=verify_area(VERIFY_READ, uservaddr, sockaddr_len);
+  if(er)
+  	return er;
   memcpy_fromfs(&sockun, uservaddr, sockaddr_len);
   sockun.sun_path[sockaddr_len-UN_PATH_OFFSET] = '\0';
   if (sockun.sun_family != AF_UNIX) {
@@ -510,7 +556,7 @@ unix_proto_accept(struct socket *sock, struct socket *newsock, int flags)
   UN_DATA(newsock)->peerupd	       = UN_DATA(clientsock);
   UN_DATA(newsock)->sockaddr_un        = UN_DATA(sock)->sockaddr_un;
   UN_DATA(newsock)->sockaddr_len       = UN_DATA(sock)->sockaddr_len;
-  wake_up(clientsock->wait);
+  wake_up_interruptible(clientsock->wait);
   return(0);
 }
 
@@ -522,6 +568,7 @@ unix_proto_getname(struct socket *sock, struct sockaddr *usockaddr,
 {
   struct unix_proto_data *upd;
   int len;
+  int er;
 
   dprintf(1, "UNIX: getname: socket 0x%x for %s\n", sock, peer?"peer":"self");
   if (peer) {
@@ -533,11 +580,15 @@ unix_proto_getname(struct socket *sock, struct sockaddr *usockaddr,
   } else
 	upd = UN_DATA(sock);
 
-  verify_area(VERIFY_WRITE, usockaddr_len, sizeof(*usockaddr_len));
+  er=verify_area(VERIFY_WRITE, usockaddr_len, sizeof(*usockaddr_len));
+  if(er)
+  	return er;
   if ((len = get_fs_long(usockaddr_len)) <= 0) return(-EINVAL);
   if (len > upd->sockaddr_len) len = upd->sockaddr_len;
   if (len) {
-	verify_area(VERIFY_WRITE, usockaddr, len);
+	er=verify_area(VERIFY_WRITE, usockaddr, len);
+	if(er)
+		return er;
 	memcpy_tofs(usockaddr, &upd->sockaddr_un, len);
   }
   put_fs_long(len, usockaddr_len);
@@ -551,6 +602,7 @@ unix_proto_read(struct socket *sock, char *ubuf, int size, int nonblock)
 {
   struct unix_proto_data *upd;
   int todo, avail;
+  int er;
 
   if ((todo = size) <= 0) return(0);
   upd = UN_DATA(sock);
@@ -572,27 +624,35 @@ unix_proto_read(struct socket *sock, char *ubuf, int size, int nonblock)
    * Copy from the read buffer into the user's buffer,
    * watching for wraparound. Then we wake up the writer.
    */
+   
+  unix_lock(upd);
   do {
 	int part, cando;
 
 	if (avail <= 0) {
 		printk("UNIX: read: AVAIL IS NEGATIVE!!!\n");
 		send_sig(SIGKILL, current, 1);
-		return(-EINTR);
+		return(-EPIPE);
 	}
 
 	if ((cando = todo) > avail) cando = avail;
 	if (cando >(part = BUF_SIZE - upd->bp_tail)) cando = part;
 	dprintf(1, "UNIX: read: avail=%d, todo=%d, cando=%d\n",
 	       					avail, todo, cando);
-	verify_area(VERIFY_WRITE, ubuf, cando);
+	if((er=verify_area(VERIFY_WRITE,ubuf,cando))<0)
+	{
+		unix_unlock(upd);
+		return er;
+	}
 	memcpy_tofs(ubuf, upd->buf + upd->bp_tail, cando);
 	upd->bp_tail =(upd->bp_tail + cando) &(BUF_SIZE-1);
 	ubuf += cando;
 	todo -= cando;
-	if (sock->state == SS_CONNECTED) wake_up(sock->conn->wait);
+	if (sock->state == SS_CONNECTED)
+		wake_up_interruptible(sock->conn->wait);
 	avail = UN_BUF_AVAIL(upd);
   } while(todo && avail);
+  unix_unlock(upd);
   return(size - todo);
 }
 
@@ -607,13 +667,14 @@ unix_proto_write(struct socket *sock, char *ubuf, int size, int nonblock)
 {
   struct unix_proto_data *pupd;
   int todo, space;
+  int er;
 
   if ((todo = size) <= 0) return(0);
   if (sock->state != SS_CONNECTED) {
 	dprintf(1, "UNIX: write: socket not connected\n");
 	if (sock->state == SS_DISCONNECTING) {
 		send_sig(SIGPIPE, current, 1);
-		return(-EINTR);
+		return(-EPIPE);
 	}
 	return(-EINVAL);
   }
@@ -630,7 +691,7 @@ unix_proto_write(struct socket *sock, char *ubuf, int size, int nonblock)
 	if (sock->state == SS_DISCONNECTING) {
 		dprintf(1, "UNIX: write: disconnected(SIGPIPE)\n");
 		send_sig(SIGPIPE, current, 1);
-		return(-EINTR);
+		return(-EPIPE);
 	}
   }
 
@@ -638,13 +699,16 @@ unix_proto_write(struct socket *sock, char *ubuf, int size, int nonblock)
    * Copy from the user's buffer to the write buffer,
    * watching for wraparound. Then we wake up the reader.
    */
+   
+  unix_lock(pupd);
+  
   do {
 	int part, cando;
 
 	if (space <= 0) {
 		printk("UNIX: write: SPACE IS NEGATIVE!!!\n");
 		send_sig(SIGKILL, current, 1);
-		return(-EINTR);
+		return(-EPIPE);
 	}
 
 	/*
@@ -653,20 +717,28 @@ unix_proto_write(struct socket *sock, char *ubuf, int size, int nonblock)
 	 */
 	if (sock->state == SS_DISCONNECTING) {
 		send_sig(SIGPIPE, current, 1);
-		return(-EINTR);
+		unix_unlock(pupd);
+		return(-EPIPE);
 	}
 	if ((cando = todo) > space) cando = space;
 	if (cando >(part = BUF_SIZE - pupd->bp_head)) cando = part;
 	dprintf(1, "UNIX: write: space=%d, todo=%d, cando=%d\n",
 	       					space, todo, cando);
-	verify_area(VERIFY_WRITE, ubuf, cando);
+	er=verify_area(VERIFY_READ, ubuf, cando);
+	if(er)
+	{
+		unix_unlock(pupd);
+		return er;
+	}
 	memcpy_fromfs(pupd->buf + pupd->bp_head, ubuf, cando);
 	pupd->bp_head =(pupd->bp_head + cando) &(BUF_SIZE-1);
 	ubuf += cando;
 	todo -= cando;
-	if (sock->state == SS_CONNECTED) wake_up(sock->conn->wait);
+	if (sock->state == SS_CONNECTED)
+		wake_up_interruptible(sock->conn->wait);
 	space = UN_BUF_SPACE(pupd);
   } while(todo && space);
+  unix_unlock(pupd);
   return(size - todo);
 }
 
@@ -726,6 +798,7 @@ static int
 unix_proto_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 {
   struct unix_proto_data *upd, *peerupd;
+  int er;
 
   upd = UN_DATA(sock);
   peerupd = (sock->state == SS_CONNECTED) ? UN_DATA(sock->conn) : NULL;
@@ -733,15 +806,19 @@ unix_proto_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
   switch(cmd) {
 	case TIOCINQ:
 		if (sock->flags & SO_ACCEPTCON) return(-EINVAL);
-		verify_area(VERIFY_WRITE,(void *)arg, sizeof(unsigned long));
+		er=verify_area(VERIFY_WRITE,(void *)arg, sizeof(unsigned long));
+		if(er)
+			return er;
 		if (UN_BUF_AVAIL(upd) || peerupd)
 			put_fs_long(UN_BUF_AVAIL(upd),(unsigned long *)arg);
 		  else
-			put_fs_long(1,(unsigned long *)arg); /* read EOF */
+			put_fs_long(0,(unsigned long *)arg);
 		break;
 	case TIOCOUTQ:
 		if (sock->flags & SO_ACCEPTCON) return(-EINVAL);
-		verify_area(VERIFY_WRITE,(void *)arg, sizeof(unsigned long));
+		er=verify_area(VERIFY_WRITE,(void *)arg, sizeof(unsigned long));
+		if(er)
+			return er;
 		if (peerupd) put_fs_long(UN_BUF_SPACE(peerupd),
 				   		(unsigned long *)arg);
 		  else
@@ -779,6 +856,7 @@ unix_ioctl(struct inode *inode, struct file *file,
 	 unsigned int cmd, unsigned long arg)
 {
   int minor, ret;
+  int er;
 
   dprintf(1, "UNIX: ioctl(0x%X, 0x%X)\n", cmd, arg);
   minor = MINOR(inode->i_rdev);
@@ -787,7 +865,9 @@ unix_ioctl(struct inode *inode, struct file *file,
   ret = -EINVAL;
   switch(cmd) {
 	case DDIOCSDBG:
-		verify_area(VERIFY_WRITE,(void *)arg, sizeof(int));
+		er=verify_area(VERIFY_READ,(void *)arg, sizeof(int));
+		if(er)
+			return er;
 		unix_debug = get_fs_long((int *)arg);
 		if (unix_debug != 0 && unix_debug != 1) {
 			unix_debug = 0;
@@ -802,6 +882,8 @@ unix_ioctl(struct inode *inode, struct file *file,
   }
   return(ret);
 }
+
+
 
 
 static struct file_operations unix_fops = {

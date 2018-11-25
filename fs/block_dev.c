@@ -21,7 +21,7 @@ int block_write(struct inode * inode, struct file * filp, char * buf, int count)
 	int offset;
 	int chars;
 	int written = 0;
-	int size;
+	unsigned int size;
 	unsigned int dev;
 	struct buffer_head * bh;
 	register char * p;
@@ -44,7 +44,7 @@ int block_write(struct inode * inode, struct file * filp, char * buf, int count)
 	if (blk_size[MAJOR(dev)])
 		size = (blk_size[MAJOR(dev)][MINOR(dev)] << BLOCK_SIZE_BITS) >> blocksize_bits;
 	else
-		size = 0x7fffffff;
+		size = INT_MAX;
 	while (count>0) {
 		if (block >= size)
 			return written;
@@ -73,7 +73,7 @@ int block_write(struct inode * inode, struct file * filp, char * buf, int count)
 	return written;
 }
 
-#define NBUF 16
+#define NBUF 32
 
 int block_read(struct inode * inode, struct file * filp, char * buf, int count)
 {
@@ -81,7 +81,8 @@ int block_read(struct inode * inode, struct file * filp, char * buf, int count)
 	unsigned int offset;
 	int blocksize;
 	int blocksize_bits, i;
-	int blocks, left;
+	unsigned int left;
+	unsigned int blocks;
 	int bhrequest, uptodate;
 	struct buffer_head ** bhb, ** bhe;
 	struct buffer_head * buflist[NBUF];
@@ -106,7 +107,7 @@ int block_read(struct inode * inode, struct file * filp, char * buf, int count)
 	if (blk_size[MAJOR(dev)])
 		size = blk_size[MAJOR(dev)][MINOR(dev)] << BLOCK_SIZE_BITS;
 	else
-		size = 0x7fffffff;
+		size = INT_MAX;
 
 	if (offset > size)
 		left = 0;
@@ -168,6 +169,9 @@ int block_read(struct inode * inode, struct file * filp, char * buf, int count)
 			if (*bhe) {
 				wait_on_buffer(*bhe);
 				if (!(*bhe)->b_uptodate) {	/* read error? */
+				        brelse(*bhe);
+					if (++bhe == &buflist[NBUF])
+					  bhe = buflist;
 					left = 0;
 					break;
 				}
