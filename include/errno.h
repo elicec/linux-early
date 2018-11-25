@@ -16,7 +16,6 @@
 
 extern int errno;
 
-#define ERROR		99
 #define EPERM		 1
 #define ENOENT		 2
 #define ESRCH		 3
@@ -56,6 +55,7 @@ extern int errno;
 #define ENOLCK		37
 #define ENOSYS		38
 #define ENOTEMPTY	39
+#define ELOOP		40
 
 /* Should never be seen by user programs */
 #define ERESTARTSYS	512

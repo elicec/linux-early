@@ -1,5 +1,5 @@
 /*
- * linux/kernel/math/math_emulate.c
+ * linux/kernel/math/emulate.c
  *
  * (C) 1991 Linus Torvalds
  */
@@ -29,6 +29,8 @@
  * to 80-bit temporary reals, and do with them as they please. I wanted to
  * hide most of the 387-specific things here.
  */
+
+#ifdef KERNEL_MATH_EMULATION
 
 #include <signal.h>
 
@@ -124,12 +126,20 @@ static void do_emu(struct info * info)
 			return;
 		case 0x1ef:
 			math_abort(info,1<<(SIGILL-1));
+		case 0x1fa:
+			fsqrt(PST(0),&tmp);
+			real_to_real(&tmp,&ST(0));
+			return;
 		case 0x1f0: case 0x1f1: case 0x1f2: case 0x1f3:
 		case 0x1f4: case 0x1f5: case 0x1f6: case 0x1f7:
-		case 0x1f8: case 0x1f9: case 0x1fa: case 0x1fb:
-		case 0x1fc: case 0x1fd: case 0x1fe: case 0x1ff:
-			printk("%04x fxxx not implemented\n\r",code + 0xc800);
+		case 0x1f8: case 0x1f9: case 0x1fb: case 0x1fd:
+		case 0x1fe: case 0x1ff:
+			printk("%04x fxxx not implemented\n\r",code + 0xd800);
 			math_abort(info,1<<(SIGILL-1));
+		case 0x1fc:
+			frndint(PST(0),&tmp);
+			real_to_real(&tmp,&ST(0));
+			return;
 		case 0x2e9:
 			fucom(PST(1),PST(0));
 			fpop(); fpop();
@@ -164,12 +174,10 @@ static void do_emu(struct info * info)
 			real_to_real(&tmp,&ST(0));
 			return;
 		case 0x1a:
-			fcom(PST(code & 7),&tmp);
-			real_to_real(&tmp,&ST(0));
+			fcom(PST(code & 7),PST(0));
 			return;
 		case 0x1b:
-			fcom(PST(code & 7),&tmp);
-			real_to_real(&tmp,&ST(0));
+			fcom(PST(code & 7),PST(0));
 			fpop();
 			return;
 		case 0x1c:
@@ -193,7 +201,7 @@ static void do_emu(struct info * info)
 			return;
 		case 0x38:
 			fpush();
-			ST(0) = ST((code & 7)+1);
+			ST(0) = ST((code+1) & 7);
 			return;
 		case 0x39:
 			fxchg(&ST(0),&ST(code & 7));
@@ -481,15 +489,14 @@ void math_emulate(long ___false)
 		I387.swd = 0x0000;
 		I387.twd = 0x0000;
 	}
-/* &___false points to info->___orig_eip, so subtract 1 to get info */
-	do_emu((struct info *) ((&___false) - 1));
+	do_emu((struct info *) &___false);
 }
 
 void __math_abort(struct info * info, unsigned int signal)
 {
 	EIP = ORIG_EIP;
 	current->signal |= signal;
-	__asm__("movl %0,%%esp ; ret"::"g" ((long) info));
+	__asm__("movl %0,%%esp ; ret"::"g" (((long) info)-4));
 }
 
 static void fpop(void)
@@ -527,3 +534,16 @@ static temp_real_unaligned * __st(int i)
 	i &= 7;
 	return (temp_real_unaligned *) (i*10 + (char *)(I387.st_space));
 }
+
+#else /* no math emulation */
+
+#include <signal.h>
+#include <linux/sched.h>
+
+void math_emulate(long ___false)
+{
+	current->signal |= 1<<(SIGFPE-1);
+	schedule();
+}
+
+#endif /* KERNEL_MATH_EMULATION */

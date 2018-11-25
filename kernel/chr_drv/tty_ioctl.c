@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <termios.h>
+#include <sys/types.h>
 
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -16,7 +17,9 @@
 #include <asm/system.h>
 
 extern int session_of_pgrp(int pgrp);
-extern int tty_signal(int sig, struct tty_struct *tty);
+extern int do_screendump(int arg);
+extern int kill_pg(int pgrp, int sig, int priv);
+extern int vt_ioctl(struct tty_struct *tty, int dev, int cmd, int arg);
 
 static unsigned short quotient[] = {
 	0, 2304, 1536, 1047, 857,
@@ -41,19 +44,77 @@ static void change_speed(struct tty_struct * tty)
 
 static void flush(struct tty_queue * queue)
 {
-	cli();
-	queue->head = queue->tail;
-	sti();
+	if (queue) {
+		cli();
+		queue->head = queue->tail;
+		sti();
+		wake_up(&queue->proc_list);
+	}
+}
+
+void flush_input(struct tty_struct * tty)
+{
+	flush(tty->read_q);
+	flush(tty->secondary);
+	tty->secondary->data = 0;
+	wake_up(&tty->read_q->proc_list);
 }
 
 static void wait_until_sent(struct tty_struct * tty)
 {
-	/* do nothing - not implemented */
+	while (!(current->signal & ~current->blocked) && !EMPTY(tty->write_q)) {
+		TTY_WRITE_FLUSH(tty);
+		current->counter = 0;
+		cli();
+		if (EMPTY(tty->write_q))
+			break;
+		else
+			interruptible_sleep_on(&tty->write_q->proc_list);
+		sti();
+	}
+	sti();
 }
 
 static void send_break(struct tty_struct * tty)
 {
-	/* do nothing - not implemented */
+	unsigned short port;
+
+	if (!(port = tty->read_q->data))
+		return;
+	port += 3;
+	current->state = TASK_INTERRUPTIBLE;
+	current->timeout = jiffies + 25;
+	outb_p(inb_p(port) | 0x40,port);
+	schedule();
+	outb_p(inb_p(port) & 0xbf,port);
+}
+
+static int do_get_ps_info(int arg)
+{
+	struct tstruct {
+		int flag;
+		int present[NR_TASKS];
+		struct task_struct tasks[NR_TASKS];
+	};
+	struct tstruct *ts = (struct tstruct *)arg;
+	struct task_struct **p;
+	char *c, *d;
+	int i, n = 0;
+	
+	verify_area((void *)arg, sizeof(struct tstruct));
+		
+	for (p = &FIRST_TASK ; p <= &LAST_TASK ; p++, n++)
+		if (*p)
+		{
+			c = (char *)(*p);
+			d = (char *)(ts->tasks+n);
+			for (i=0 ; i<sizeof(struct task_struct) ; i++)
+				put_fs_byte(*c++, d++);
+			put_fs_long(1, (unsigned long *)(ts->present+n));
+		}
+		else	
+			put_fs_long(0, (unsigned long *)(ts->present+n));
+	return(0);			
 }
 
 static int get_termios(struct tty_struct * tty, struct termios * termios)
@@ -69,15 +130,17 @@ static int get_termios(struct tty_struct * tty, struct termios * termios)
 static int set_termios(struct tty_struct * tty, struct termios * termios,
 			int channel)
 {
-	int i, retsig;
+	int i;
 
 	/* If we try to set the state of terminal and we're not in the
 	   foreground, send a SIGTTOU.  If the signal is blocked or
 	   ignored, go ahead and perform the operation.  POSIX 7.2) */
-	if ((current->tty == channel) && (tty->pgrp != current->pgrp)) {
-		retsig = tty_signal(SIGTTOU, tty);
-		if (retsig == -ERESTARTSYS || retsig == -EINTR)
-			return retsig;
+	if ((current->tty == channel) &&
+	     (tty->pgrp != current->pgrp)) {
+		if (is_orphaned_pgrp(current->pgrp))
+			return -EIO;
+		if (!is_ignored(SIGTTOU))
+			return tty_signal(SIGTTOU, tty);
 	}
 	for (i=0 ; i< (sizeof (*termios)) ; i++)
 		((char *)&tty->termios)[i]=get_fs_byte(i+(char *)termios);
@@ -104,18 +167,21 @@ static int get_termio(struct tty_struct * tty, struct termio * termio)
 }
 
 /*
- * This only works as the 386 is low-byt-first
+ * This only works as the 386 is low-byte-first
  */
 static int set_termio(struct tty_struct * tty, struct termio * termio,
 			int channel)
 {
-	int i, retsig;
+	int i;
 	struct termio tmp_termio;
 
-	if ((current->tty == channel) && (tty->pgrp != current->pgrp)) {
-		retsig = tty_signal(SIGTTOU, tty);
-		if (retsig == -ERESTARTSYS || retsig == -EINTR)
-			return retsig;
+	if ((current->tty == channel) &&
+	    (tty->pgrp > 0) &&
+	    (tty->pgrp != current->pgrp)) {
+		if (is_orphaned_pgrp(current->pgrp))
+			return -EIO;
+		if (!is_ignored(SIGTTOU))
+			return tty_signal(SIGTTOU, tty);
 	}
 	for (i=0 ; i< (sizeof (*termio)) ; i++)
 		((char *)&tmp_termio)[i]=get_fs_byte(i+(char *)termio);
@@ -130,50 +196,102 @@ static int set_termio(struct tty_struct * tty, struct termio * termio,
 	return 0;
 }
 
-int tty_ioctl(int dev, int cmd, int arg)
+static int set_window_size(struct tty_struct * tty, struct winsize * ws)
+{
+	int i,changed;
+	char c, * tmp;
+
+	if (!ws)
+		return -EINVAL;
+	tmp = (char *) &tty->winsize;
+	changed = 0;
+	for (i = 0; i < sizeof (*ws) ; i++,tmp++) {
+		c = get_fs_byte(i + (char *) ws);
+		if (c == *tmp)
+			continue;
+		changed = 1;
+		*tmp = c;
+	}
+	if (changed)
+		kill_pg(tty->pgrp, SIGWINCH, 1);
+	return 0;
+}
+
+static int get_window_size(struct tty_struct * tty, struct winsize * ws)
+{
+	int i;
+	char * tmp;
+
+	if (!ws)
+		return -EINVAL;
+	verify_area(ws, sizeof (*ws));
+	tmp = (char *) ws;
+	for (i = 0; i < sizeof (struct winsize) ; i++,tmp++)
+		put_fs_byte(((char *) &tty->winsize)[i], tmp);
+	return 0;
+}
+
+int tty_ioctl(struct inode * inode, struct file * file,
+	unsigned int cmd, unsigned int arg)
 {
 	struct tty_struct * tty;
-	int	pgrp;
+	struct tty_struct * other_tty;
+	int pgrp;
+	int dev;
 
-	if (MAJOR(dev) == 5) {
-		dev=current->tty;
+	if (MAJOR(inode->i_rdev) == 5) {
+		dev = current->tty;
 		if (dev<0)
-			panic("tty_ioctl: dev<0");
+			return -EINVAL;
 	} else
-		dev=MINOR(dev);
+		dev = MINOR(inode->i_rdev);
 	tty = tty_table + (dev ? ((dev < 64)? dev-1:dev) : fg_console);
+
+	if (IS_A_PTY(dev))
+		other_tty = tty_table + PTY_OTHER(dev);
+	else
+		other_tty = NULL;
+		
+	if (!(tty->write_q && tty->read_q && tty->secondary && tty->write))
+		return -EINVAL;
 	switch (cmd) {
 		case TCGETS:
 			return get_termios(tty,(struct termios *) arg);
 		case TCSETSF:
-			flush(tty->read_q); /* fallthrough */
+			flush_input(tty);
+			if (other_tty)
+				flush(other_tty->write_q);
+		/* fallthrough */
 		case TCSETSW:
-			wait_until_sent(tty); /* fallthrough */
+			wait_until_sent(tty);
+		/* fallthrough */
 		case TCSETS:
 			return set_termios(tty,(struct termios *) arg, dev);
 		case TCGETA:
 			return get_termio(tty,(struct termio *) arg);
 		case TCSETAF:
-			flush(tty->read_q); /* fallthrough */
+			flush_input(tty);
+			if (other_tty)
+				flush(other_tty->write_q);
+		/* fallthrough */
 		case TCSETAW:
 			wait_until_sent(tty); /* fallthrough */
 		case TCSETA:
 			return set_termio(tty,(struct termio *) arg, dev);
 		case TCSBRK:
-			if (!arg) {
-				wait_until_sent(tty);
+			wait_until_sent(tty);
+			if (!arg)
 				send_break(tty);
-			}
 			return 0;
 		case TCXONC:
 			switch (arg) {
 			case TCOOFF:
 				tty->stopped = 1;
-				tty->write(tty);
+				TTY_WRITE_FLUSH(tty);
 				return 0;
 			case TCOON:
 				tty->stopped = 0;
-				tty->write(tty);
+				TTY_WRITE_FLUSH(tty);
 				return 0;
 			case TCIOFF:
 				if (STOP_CHAR(tty))
@@ -186,13 +304,17 @@ int tty_ioctl(int dev, int cmd, int arg)
 			}
 			return -EINVAL; /* not implemented */
 		case TCFLSH:
-			if (arg==0)
-				flush(tty->read_q);
-			else if (arg==1)
+			if (arg==0) {
+				flush_input(tty);
+				if (other_tty)
+					flush(other_tty->write_q);
+			} else if (arg==1)
 				flush(tty->write_q);
 			else if (arg==2) {
-				flush(tty->read_q);
+				flush_input(tty);
 				flush(tty->write_q);
+				if (other_tty)
+					flush(other_tty->write_q);
 			} else
 				return -EINVAL;
 			return 0;
@@ -224,15 +346,20 @@ int tty_ioctl(int dev, int cmd, int arg)
 			return 0;
 		case TIOCINQ:
 			verify_area((void *) arg,4);
-			put_fs_long(CHARS(tty->secondary),
-				(unsigned long *) arg);
+			if (L_CANON(tty) && !tty->secondary->data)
+				put_fs_long(0, (unsigned long *) arg);
+			else
+				put_fs_long(CHARS(tty->secondary),
+					(unsigned long *) arg);
 			return 0;
 		case TIOCSTI:
 			return -EINVAL; /* not implemented */
 		case TIOCGWINSZ:
-			return -EINVAL; /* not implemented */
+			return get_window_size(tty,(struct winsize *) arg);
 		case TIOCSWINSZ:
-			return -EINVAL; /* not implemented */
+			if (IS_A_PTY_MASTER(dev))
+				set_window_size(other_tty,(struct winsize *) arg);
+			return set_window_size(tty,(struct winsize *) arg);
 		case TIOCMGET:
 			return -EINVAL; /* not implemented */
 		case TIOCMBIS:
@@ -245,7 +372,29 @@ int tty_ioctl(int dev, int cmd, int arg)
 			return -EINVAL; /* not implemented */
 		case TIOCSSOFTCAR:
 			return -EINVAL; /* not implemented */
+		case TIOCLINUX:
+			switch (get_fs_byte((char *)arg))
+			{
+				case 0: 
+					return do_screendump(arg);
+				case 1: 
+					return do_get_ps_info(arg);
+				default: 
+					return -EINVAL;
+			}
+		case TIOCCONS:
+			if (!IS_A_PTY(dev))
+				return -EINVAL;
+			if (redirect)
+				return -EBUSY;
+			if (!suser())
+				return -EPERM;
+			if (IS_A_PTY_MASTER(dev))
+				redirect = other_tty;
+			else
+				redirect = tty;
+			return 0;
 		default:
-			return -EINVAL;
+			return vt_ioctl(tty, dev, cmd, arg);
 	}
 }

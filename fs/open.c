@@ -4,32 +4,116 @@
  *  (C) 1991  Linus Torvalds
  */
 
-#include <string.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/types.h>
 #include <utime.h>
-#include <sys/stat.h>
 
+#include <sys/vfs.h>
+
+#include <linux/stat.h>
+#include <linux/string.h>
 #include <linux/sched.h>
-#include <linux/tty.h>
 #include <linux/kernel.h>
 
 #include <asm/segment.h>
+
+struct file_operations * chrdev_fops[MAX_CHRDEV] = {
+	NULL,
+};
+
+struct file_operations * blkdev_fops[MAX_BLKDEV] = {
+	NULL,
+};
 
 int sys_ustat(int dev, struct ustat * ubuf)
 {
 	return -ENOSYS;
 }
 
+int sys_statfs(const char * path, struct statfs * buf)
+{
+	struct inode * inode;
+
+	verify_area(buf, sizeof(struct statfs));
+	if (!(inode = namei(path)))
+		return -ENOENT;
+	if (!inode->i_sb->s_op->statfs) {
+		iput(inode);
+		return -ENOSYS;
+	}
+	inode->i_sb->s_op->statfs(inode->i_sb, buf);
+	iput(inode);
+	return 0;
+}
+
+int sys_fstatfs(unsigned int fd, struct statfs * buf)
+{
+	struct inode * inode;
+	struct file * file;
+
+	verify_area(buf, sizeof(struct statfs));
+	if (fd >= NR_OPEN || !(file = current->filp[fd]))
+		return -EBADF;
+	if (!(inode = file->f_inode))
+		return -ENOENT;
+	if (!inode->i_sb->s_op->statfs)
+		return -ENOSYS;
+	inode->i_sb->s_op->statfs(inode->i_sb, buf);
+	return 0;
+}
+
+int sys_truncate(const char * path, unsigned int length)
+{
+	struct inode * inode;
+
+	if (!(inode = namei(path)))
+		return -ENOENT;
+	if (S_ISDIR(inode->i_mode) || !permission(inode,MAY_WRITE)) {
+		iput(inode);
+		return -EACCES;
+	}
+	inode->i_size = length;
+	if (inode->i_op && inode->i_op->truncate)
+		inode->i_op->truncate(inode);
+	inode->i_atime = inode->i_mtime = CURRENT_TIME;
+	inode->i_dirt = 1;
+	iput(inode);
+	return 0;
+}
+
+int sys_ftruncate(unsigned int fd, unsigned int length)
+{
+	struct inode * inode;
+	struct file * file;
+
+	if (fd >= NR_OPEN || !(file = current->filp[fd]))
+		return -EBADF;
+	if (!(inode = file->f_inode))
+		return -ENOENT;
+	if (S_ISDIR(inode->i_mode) || !(file->f_flags & 2))
+		return -EACCES;
+	inode->i_size = length;
+	if (inode->i_op && inode->i_op->truncate)
+		inode->i_op->truncate(inode);
+	inode->i_atime = inode->i_mtime = CURRENT_TIME;
+	inode->i_dirt = 1;
+	return 0;
+}
+
 int sys_utime(char * filename, struct utimbuf * times)
 {
-	struct m_inode * inode;
+	struct inode * inode;
 	long actime,modtime;
 
 	if (!(inode=namei(filename)))
 		return -ENOENT;
 	if (times) {
+		if (current->euid != inode->i_uid &&
+		    !permission(inode,MAY_WRITE)) {
+			iput(inode);
+			return -EACCES;
+		}
 		actime = get_fs_long((unsigned long *) &times->actime);
 		modtime = get_fs_long((unsigned long *) &times->modtime);
 	} else
@@ -47,7 +131,7 @@ int sys_utime(char * filename, struct utimbuf * times)
  */
 int sys_access(const char * filename,int mode)
 {
-	struct m_inode * inode;
+	struct inode * inode;
 	int res, i_mode;
 
 	mode &= 0007;
@@ -57,8 +141,8 @@ int sys_access(const char * filename,int mode)
 	iput(inode);
 	if (current->uid == inode->i_uid)
 		res >>= 6;
-	else if (current->gid == inode->i_gid)
-		res >>= 6;
+	else if (in_group_p(inode->i_gid))
+		res >>= 3;
 	if ((res & 0007 & mode) == mode)
 		return 0;
 	/*
@@ -75,13 +159,17 @@ int sys_access(const char * filename,int mode)
 
 int sys_chdir(const char * filename)
 {
-	struct m_inode * inode;
+	struct inode * inode;
 
 	if (!(inode = namei(filename)))
 		return -ENOENT;
 	if (!S_ISDIR(inode->i_mode)) {
 		iput(inode);
 		return -ENOTDIR;
+	}
+	if (!permission(inode,MAY_EXEC)) {
+		iput(inode);
+		return -EACCES;
 	}
 	iput(current->pwd);
 	current->pwd = inode;
@@ -90,7 +178,7 @@ int sys_chdir(const char * filename)
 
 int sys_chroot(const char * filename)
 {
-	struct m_inode * inode;
+	struct inode * inode;
 
 	if (!(inode=namei(filename)))
 		return -ENOENT;
@@ -98,20 +186,40 @@ int sys_chroot(const char * filename)
 		iput(inode);
 		return -ENOTDIR;
 	}
+	if (!suser()) {
+		iput(inode);
+		return -EPERM;
+	}
 	iput(current->root);
 	current->root = inode;
 	return (0);
 }
 
-int sys_chmod(const char * filename,int mode)
+int sys_fchmod(unsigned int fd, mode_t mode)
 {
-	struct m_inode * inode;
+	struct inode * inode;
+	struct file * file;
 
-	if (!(inode=namei(filename)))
+	if (fd >= NR_OPEN || !(file = current->filp[fd]))
+		return -EBADF;
+	if (!(inode = file->f_inode))
+		return -ENOENT;
+	if ((current->euid != inode->i_uid) && !suser())
+		return -EPERM;
+	inode->i_mode = (mode & 07777) | (inode->i_mode & ~07777);
+	inode->i_dirt = 1;
+	return 0;
+}
+
+int sys_chmod(const char * filename, mode_t mode)
+{
+	struct inode * inode;
+
+	if (!(inode = namei(filename)))
 		return -ENOENT;
 	if ((current->euid != inode->i_uid) && !suser()) {
 		iput(inode);
-		return -EACCES;
+		return -EPERM;
 	}
 	inode->i_mode = (mode & 07777) | (inode->i_mode & ~07777);
 	inode->i_dirt = 1;
@@ -119,101 +227,90 @@ int sys_chmod(const char * filename,int mode)
 	return 0;
 }
 
-int sys_chown(const char * filename,int uid,int gid)
+int sys_fchown(unsigned int fd, uid_t user, gid_t group)
 {
-	struct m_inode * inode;
+	struct inode * inode;
+	struct file * file;
 
-	if (!(inode=namei(filename)))
+	if (fd >= NR_OPEN || !(file = current->filp[fd]))
+		return -EBADF;
+	if (!(inode = file->f_inode))
 		return -ENOENT;
-	if (!suser()) {
-		iput(inode);
-		return -EACCES;
+	if ((current->euid == inode->i_uid && user == inode->i_uid &&
+	     (in_group_p(group) || group == inode->i_gid)) ||
+	    suser()) {
+		inode->i_uid = user;
+		inode->i_gid = group;
+		inode->i_dirt=1;
+		return 0;
 	}
-	inode->i_uid=uid;
-	inode->i_gid=gid;
-	inode->i_dirt=1;
-	iput(inode);
-	return 0;
+	return -EPERM;
 }
 
-static int check_char_dev(struct m_inode * inode, int dev, int flag)
+int sys_chown(const char * filename, uid_t user, gid_t group)
 {
-	struct tty_struct *tty;
-	int min;
+	struct inode * inode;
 
-	if (MAJOR(dev) == 4 || MAJOR(dev) == 5) {
-		if (MAJOR(dev) == 5)
-			min = current->tty;
-		else
-			min = MINOR(dev);
-		if (min < 0)
-			return -1;
-		if ((IS_A_PTY_MASTER(min)) && (inode->i_count>1))
-			return -1;
-		tty = TTY_TABLE(min);
-		if (!(flag & O_NOCTTY) &&
-		    current->leader &&
-		    current->tty<0 &&
-		    tty->session==0) {
-			current->tty = min;
-			tty->session= current->session;
-			tty->pgrp = current->pgrp;
-		}
-		if (flag & O_NONBLOCK) {
-			TTY_TABLE(min)->termios.c_cc[VMIN] =0;
-			TTY_TABLE(min)->termios.c_cc[VTIME] =0;
-			TTY_TABLE(min)->termios.c_lflag &= ~ICANON;
-		}
+	if (!(inode = lnamei(filename)))
+		return -ENOENT;
+	if ((current->euid == inode->i_uid && user == inode->i_uid &&
+	     (in_group_p(group) || group == inode->i_gid)) ||
+	    suser()) {
+		inode->i_uid = user;
+		inode->i_gid = group;
+		inode->i_dirt=1;
+		iput(inode);
+		return 0;
 	}
-	return 0;
+	iput(inode);
+	return -EPERM;
 }
 
 int sys_open(const char * filename,int flag,int mode)
 {
-	struct m_inode * inode;
+	struct inode * inode;
 	struct file * f;
 	int i,fd;
 
-	mode &= 0777 & ~current->umask;
 	for(fd=0 ; fd<NR_OPEN ; fd++)
 		if (!current->filp[fd])
 			break;
 	if (fd>=NR_OPEN)
-		return -EINVAL;
+		return -EMFILE;
 	current->close_on_exec &= ~(1<<fd);
 	f=0+file_table;
 	for (i=0 ; i<NR_FILE ; i++,f++)
 		if (!f->f_count) break;
 	if (i>=NR_FILE)
-		return -EINVAL;
-	(current->filp[fd]=f)->f_count++;
-	if ((i=open_namei(filename,flag,mode,&inode))<0) {
+		return -ENFILE;
+	(current->filp[fd] = f)->f_count++;
+	if ((i = open_namei(filename,flag,mode,&inode))<0) {
 		current->filp[fd]=NULL;
 		f->f_count=0;
 		return i;
 	}
-/* ttys are somewhat special (ttyxx major==4, tty major==5) */
-	if (S_ISCHR(inode->i_mode))
-		if (check_char_dev(inode,inode->i_zone[0],flag)) {
-			iput(inode);
-			current->filp[fd]=NULL;
-			f->f_count=0;
-			return -EAGAIN;
-		}
-/* Likewise with block-devices: check for floppy_change */
-	if (S_ISBLK(inode->i_mode))
-		check_disk_change(inode->i_zone[0]);
-	f->f_mode = inode->i_mode;
+	f->f_mode = "\001\002\003\000"[flag & O_ACCMODE];
 	f->f_flags = flag;
 	f->f_count = 1;
 	f->f_inode = inode;
 	f->f_pos = 0;
+	f->f_reada = 0;
+	f->f_op = NULL;
+	if (inode->i_op)
+		f->f_op = inode->i_op->default_file_ops;
+	if (f->f_op && f->f_op->open)
+		if (i = f->f_op->open(inode,f)) {
+			iput(inode);
+			f->f_count=0;
+			current->filp[fd]=NULL;
+			return i;
+		}
 	return (fd);
 }
 
 int sys_creat(const char * pathname, int mode)
 {
-	return sys_open(pathname, O_CREAT | O_TRUNC, mode);
+	return sys_open(pathname, O_CREAT | O_WRONLY | O_TRUNC, mode);
 }
 
 int sys_close(unsigned int fd)
@@ -226,10 +323,17 @@ int sys_close(unsigned int fd)
 	if (!(filp = current->filp[fd]))
 		return -EINVAL;
 	current->filp[fd] = NULL;
-	if (filp->f_count == 0)
-		panic("Close: file count is 0");
-	if (--filp->f_count)
-		return (0);
+	if (filp->f_count == 0) {
+		printk("Close: file count is 0\n");
+		return 0;
+	}
+	if (filp->f_count > 1) {
+		filp->f_count--;
+		return 0;
+	}
+	if (filp->f_op && filp->f_op->release)
+		filp->f_op->release(filp->f_inode,filp);
 	iput(filp->f_inode);
-	return (0);
+	filp->f_count--;
+	return 0;
 }

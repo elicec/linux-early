@@ -1,10 +1,17 @@
-CC	=gcc
-CFLAGS	=-O -Wall -fstrength-reduce -fcombine-regs -fomit-frame-pointer \
-	-finline-functions -nostdinc -I../include
-AS	=gas
-AR	=gar
-LD	=gld
-CPP	=gcc -E -nostdinc -I../include
+#
+# Makefile for the linux memory manager.
+#
+# Note! Dependencies are done automagically by 'make dep', which also
+# removes any old dependencies. DON'T put your own dependencies here
+# unless it's something special (ie not a .c file).
+#
+# Note 2! The CFLAGS definition is now in the main makefile...
+
+AS	=as
+AR	=ar
+LD	=ld
+CC	=gcc -nostdinc -I../include
+CPP	=cpp -nostdinc -I../include
 
 .c.o:
 	$(CC) $(CFLAGS) \
@@ -15,9 +22,7 @@ CPP	=gcc -E -nostdinc -I../include
 	$(CC) $(CFLAGS) \
 	-S -o $*.s $<
 
-OBJS	= memory.o swap.o page.o
-
-all: mm.o
+OBJS	= memory.o swap.o mmap.o
 
 mm.o: $(OBJS)
 	$(LD) -r -o mm.o $(OBJS)
@@ -32,13 +37,17 @@ dep:
 	cp tmp_make Makefile
 
 ### Dependencies:
-memory.o : memory.c ../include/signal.h ../include/sys/types.h \
-  ../include/asm/system.h ../include/linux/sched.h ../include/linux/head.h \
-  ../include/linux/fs.h ../include/linux/mm.h ../include/linux/kernel.h \
-  ../include/sys/param.h ../include/sys/time.h ../include/time.h \
-  ../include/sys/resource.h 
-swap.o : swap.c ../include/string.h ../include/linux/sched.h \
-  ../include/linux/head.h ../include/linux/fs.h ../include/sys/types.h \
-  ../include/linux/mm.h ../include/linux/kernel.h ../include/signal.h \
-  ../include/sys/param.h ../include/sys/time.h ../include/time.h \
-  ../include/sys/resource.h 
+memory.o : memory.c ../include/signal.h ../include/sys/types.h ../include/asm/system.h \
+  ../include/linux/sched.h ../include/linux/head.h ../include/linux/fs.h ../include/sys/dirent.h \
+  ../include/limits.h ../include/sys/vfs.h ../include/linux/mm.h ../include/linux/kernel.h \
+  ../include/sys/param.h ../include/sys/time.h ../include/time.h ../include/sys/resource.h 
+mmap.o : mmap.c ../include/linux/stat.h ../include/linux/sched.h ../include/linux/head.h \
+  ../include/linux/fs.h ../include/sys/types.h ../include/sys/dirent.h ../include/limits.h \
+  ../include/sys/vfs.h ../include/linux/mm.h ../include/linux/kernel.h ../include/signal.h \
+  ../include/sys/param.h ../include/sys/time.h ../include/time.h ../include/sys/resource.h \
+  ../include/asm/segment.h ../include/asm/system.h ../include/errno.h ../include/sys/mman.h 
+swap.o : swap.c ../include/errno.h ../include/linux/stat.h ../include/linux/mm.h \
+  ../include/linux/fs.h ../include/sys/types.h ../include/sys/dirent.h ../include/limits.h \
+  ../include/sys/vfs.h ../include/linux/kernel.h ../include/signal.h ../include/linux/string.h \
+  ../include/linux/sched.h ../include/linux/head.h ../include/sys/param.h ../include/sys/time.h \
+  ../include/time.h ../include/sys/resource.h 

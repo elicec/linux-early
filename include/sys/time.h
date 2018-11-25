@@ -24,6 +24,7 @@ struct timezone {
 #define	DST_TUR		9	/* Turkey */
 #define	DST_AUSTALT	10	/* Australian style with shift in 1986 */
 
+#define FD_SETSIZE		(8*sizeof(fd_set))
 #define FD_SET(fd,fdsetp)	(*(fdsetp) |= (1 << (fd)))
 #define FD_CLR(fd,fdsetp)	(*(fdsetp) &= ~(1 << (fd)))
 #define FD_ISSET(fd,fdsetp)	((*(fdsetp) >> fd) & 1)
@@ -52,6 +53,9 @@ struct	itimerval {
 	struct	timeval it_interval;	/* timer interval */
 	struct	timeval it_value;	/* current value */
 };
+
+int getitimer(int which, struct itimerval *value);
+int setitimer(int which, struct itimerval *value, struct itimerval *ovalue);
 
 #include <time.h>
 #include <sys/types.h>

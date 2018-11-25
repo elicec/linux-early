@@ -4,10 +4,11 @@
  *  Written by Theodore Ts'o, 12/2/91
  */
 
-#include <string.h>
+#include <linux/string.h>
 
 #include <linux/config.h>
 #include <linux/sched.h>
+#include <linux/minix_fs.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <asm/system.h>
@@ -46,6 +47,17 @@ void do_rd_request(void)
 	goto repeat;
 }
 
+static struct file_operations rd_fops = {
+	NULL,			/* lseek - default */
+	block_read,		/* read - general block-dev read */
+	block_write,		/* write - general block-dev write */
+	NULL,			/* readdir - bad */
+	NULL,			/* select */
+	NULL,			/* ioctl */
+	NULL,			/* no special open code */
+	NULL			/* no special release code */
+};
+
 /*
  * Returns amount of memory which needs to be reserved.
  */
@@ -55,6 +67,7 @@ long rd_init(long mem_start, int length)
 	char	*cp;
 
 	blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
+	blkdev_fops[MAJOR_NR] = &rd_fops;
 	rd_start = (char *) mem_start;
 	rd_length = length;
 	cp = rd_start;
@@ -88,9 +101,9 @@ void rd_load(void)
 		printk("Disk error while looking for ramdisk!\n");
 		return;
 	}
-	*((struct d_super_block *) &s) = *((struct d_super_block *) bh->b_data);
+	*((struct minix_super_block *) &s) = *((struct minix_super_block *) bh->b_data);
 	brelse(bh);
-	if (s.s_magic != SUPER_MAGIC)
+	if (s.s_magic != MINIX_SUPER_MAGIC)
 		/* No ram disk image present, assume normal floppy boot */
 		return;
 	nblocks = s.s_nzones << s.s_log_zone_size;
@@ -99,7 +112,7 @@ void rd_load(void)
 			nblocks, rd_length >> BLOCK_SIZE_BITS);
 		return;
 	}
-	printk("Loading %d bytes into ram disk... 0000k", 
+	printk("Loading %d bytes into ram disk\n",
 		nblocks << BLOCK_SIZE_BITS);
 	cp = rd_start;
 	while (nblocks) {
@@ -114,12 +127,12 @@ void rd_load(void)
 		}
 		(void) memcpy(cp, bh->b_data, BLOCK_SIZE);
 		brelse(bh);
-		printk("\010\010\010\010\010%4dk",i);
+		if (!(nblocks-- & 15))
+			printk(".");
 		cp += BLOCK_SIZE;
 		block++;
-		nblocks--;
 		i++;
 	}
-	printk("\010\010\010\010\010done \n");
+	printk("\ndone\n");
 	ROOT_DEV=0x0101;
 }
