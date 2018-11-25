@@ -1,10 +1,25 @@
 #ifndef _AHA1542_H
 
-/* $Id: aha1542.h,v 1.1 1992/04/24 18:01:50 root Exp root $
+/* $Id: aha1542.h,v 1.1 1992/07/24 06:27:38 root Exp root $
  *
  * Header file for the adaptec 1542 driver for Linux
  *
  * $Log: aha1542.h,v $
+ * Revision 1.1  1992/07/24  06:27:38  root
+ * Initial revision
+ *
+ * Revision 1.2  1992/07/04  18:41:49  root
+ * Replaced distribution with current drivers
+ *
+ * Revision 1.3  1992/06/23  23:58:20  root
+ * Fixes.
+ *
+ * Revision 1.2  1992/05/26  22:13:23  root
+ * Changed bug that prevented DMA above first 2 mbytes.
+ *
+ * Revision 1.1  1992/05/22  21:00:29  root
+ * Initial revision
+ *
  * Revision 1.1  1992/04/24  18:01:50  root
  * Initial revision
  *
@@ -16,7 +31,7 @@
  *
  */
 
-typedef unsigned char unchar;
+#include <linux/types.h>
 
 /* I/O Port interface 4.2 */
 /* READ */
@@ -65,11 +80,17 @@ struct mailbox {
   unchar ccbptr[3];		/* msb, .., lsb */
 };
 
+/* This is used with scatter-gather */
+struct chain {
+  unchar datalen[3];		/* Size of this part of chain */
+  unchar dataptr[3];		/* Location of data */
+};
+
 /* These belong in scsi.h also */
-#define any2scsi(up, p)			\
-(up)[0] = (((long)(p)) >> 16) & 0xff;	\
-(up)[1] = ((long)(p)) >> 8;		\
-(up)[2] = ((long)(p));
+#define any2scsi(up, p)				\
+(up)[0] = (((unsigned long)(p)) >> 16)  ;	\
+(up)[1] = (((unsigned long)(p)) >> 8);		\
+(up)[2] = ((unsigned long)(p));
 
 #define scsi2int(up) ( (((long)*(up)) << 16) + (((long)(up)[1]) << 8) + ((long)(up)[2]) )
 
@@ -105,11 +126,15 @@ struct ccb {			/* Command Control Block 5.3 */
 };
 
 int aha1542_detect(int);
-int aha1542_command(unsigned char target, const void *cmnd, void *buff, int bufflen);
-/*int aha1542_queuecommand(unchar target, const void *cmnd, void *buff, int bufflen, void (*done)(int));*/
-int aha1542_abort(int);
-char *aha1542_info(void);
+int aha1542_command(Scsi_Cmnd *);
+int aha1542_queuecommand(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
+int aha1542_abort(Scsi_Cmnd *, int);
+const char *aha1542_info(void);
 int aha1542_reset(void);
+int aha1542_biosparam(int, int, int*);
+
+#define AHA1542_MAILBOXES 8
+#define AHA1542_SCATTER 16
 
 #ifndef NULL
 	#define NULL 0
@@ -117,8 +142,11 @@ int aha1542_reset(void);
 
 #define AHA1542 {"Adaptec 1542", aha1542_detect,	\
 		aha1542_info, aha1542_command,		\
-		/*aha1542_queuecommand*/ NULL,		\
+		aha1542_queuecommand,			\
 		aha1542_abort,				\
 		aha1542_reset,				\
-		0, 7, 0}
+	        NULL,		                        \
+		aha1542_biosparam,                      \
+		AHA1542_MAILBOXES, 7, AHA1542_SCATTER, 1, 0, 1}
+
 #endif

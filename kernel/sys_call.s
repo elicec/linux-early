@@ -1,7 +1,7 @@
 /*
  *  linux/kernel/sys_call.S
  *
- *  (C) 1991  Linus Torvalds
+ *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
 /*
@@ -11,6 +11,9 @@
  *
  * NOTE: This code handles signal-recognition, which happens every time
  * after a timer-interrupt and after each system call.
+ *
+ * I changed all the .align's to 4 (16 byte alignment), as that's faster
+ * on a 486.
  *
  * Stack layout in 'ret_from_system_call':
  * 	ptrace needs to have all regs on the stack.
@@ -37,7 +40,7 @@
  *	40(%esp) - %oldss
  */
 
-SIG_CHLD	= 17
+#include <linux/segment.h>
 
 EBX		= 0x00
 ECX		= 0x04
@@ -57,39 +60,32 @@ EFLAGS		= 0x38
 OLDESP		= 0x3C
 OLDSS		= 0x40
 
+CF_MASK		= 0x00000001
+IF_MASK		= 0x00000200
+NT_MASK		= 0x00004000
+VM_MASK		= 0x00020000
+
 /*
  * these are offsets into the task-struct.
  */
-state		= 0
-counter		= 4
-priority	= 8
+state		=  0
+counter		=  4
+priority	=  8
 signal		= 12
-sigaction	= 16		# MUST be 16 (=len of sigaction)
-blocked		= (33*16)
-
-/*
- * offsets within sigaction
- */
-sa_handler	= 0
-sa_mask		= 4
-sa_flags	= 8
-sa_restorer	= 12
+blocked		= 16
+flags		= 20
+errno		= 24
 
 ENOSYS = 38
 
-/*
- * Ok, I get parallel printer interrupts while using the floppy for some
- * strange reason. Urgel. Now I just ignore them.
- */
-.globl _system_call,_timer_interrupt,_sys_execve
+.globl _system_call,_lcall7
 .globl _device_not_available, _coprocessor_error
 .globl _divide_error,_debug,_nmi,_int3,_overflow,_bounds,_invalid_op
 .globl _double_fault,_coprocessor_segment_overrun
 .globl _invalid_TSS,_segment_not_present,_stack_segment
-.globl _general_protection,_irq13,_reserved
+.globl _general_protection,_reserved
 .globl _alignment_check,_page_fault
-.globl _keyboard_interrupt,_hd_interrupt
-.globl _IRQ3_interrupt,_IRQ4_interrupt
+.globl ret_from_sys_call
 
 #define SAVE_ALL \
 	cld; \
@@ -104,219 +100,150 @@ ENOSYS = 38
 	pushl %edx; \
 	pushl %ecx; \
 	pushl %ebx; \
-	movl $0x10,%edx; \
+	movl $(KERNEL_DS),%edx; \
 	mov %dx,%ds; \
 	mov %dx,%es; \
-	movl $0x17,%edx; \
+	movl $(USER_DS),%edx; \
 	mov %dx,%fs
 
-#define ACK_FIRST(mask) \
-	inb $0x21,%al; \
-	jmp 1f; \
-1:	jmp 1f; \
-1:	orb $(mask),%al; \
-	outb %al,$0x21; \
-	jmp 1f; \
-1:	jmp 1f; \
-1:	movb $0x20,%al; \
-	outb %al,$0x20
+#define RESTORE_ALL \
+	popl %ebx; \
+	popl %ecx; \
+	popl %edx; \
+	popl %esi; \
+	popl %edi; \
+	popl %ebp; \
+	popl %eax; \
+	pop %ds; \
+	pop %es; \
+	pop %fs; \
+	pop %gs; \
+	addl $4,%esp; \
+	iret
 
-#define ACK_SECOND(mask) \
-	inb $0xA1,%al; \
-	jmp 1f; \
-1:	jmp 1f; \
-1:	orb $(mask),%al; \
-	outb %al,$0xA1; \
-	jmp 1f; \
-1:	jmp 1f; \
-1:	movb $0x20,%al; \
-	outb %al,$0xA0 \
-	jmp 1f; \
-1:	jmp 1f; \
-1:	outb %al,$0x20
-
-#define UNBLK_FIRST(mask) \
-	inb $0x21,%al; \
-	jmp 1f; \
-1:	jmp 1f; \
-1:	andb $~(mask),%al; \
-	outb %al,$0x21
-
-#define UNBLK_SECOND(mask) \
-	inb $0xA1,%al; \
-	jmp 1f; \
-1:	jmp 1f; \
-1:	andb $~(mask),%al; \
-	outb %al,$0xA1
-
-.align 2
-bad_sys_call:
-	movl $-ENOSYS,EAX(%esp)
+.align 4
+_lcall7:
+	pushfl			# We get a different stack layout with call gates,
+	pushl %eax		# which has to be cleaned up later..
+	SAVE_ALL
+	movl EIP(%esp),%eax	# due to call gates, this is eflags, not eip..
+	movl CS(%esp),%edx	# this is eip..
+	movl EFLAGS(%esp),%ecx	# and this is cs..
+	movl %eax,EFLAGS(%esp)	#
+	movl %edx,EIP(%esp)	# Now we move them to their "normal" places
+	movl %ecx,CS(%esp)	#
+	movl %esp,%eax
+	pushl %eax
+	call _iABI_emulate
+	popl %eax
 	jmp ret_from_sys_call
-.align 2
+
+.align 4
+handle_bottom_half:
+	pushfl
+	incl _intr_count
+	sti
+	call _do_bottom_half
+	popfl
+	decl _intr_count
+	jmp 9f
+.align 4
 reschedule:
 	pushl $ret_from_sys_call
 	jmp _schedule
-.align 2
+.align 4
 _system_call:
-	pushl %eax		# save orig_eax
+	pushl %eax			# save orig_eax
 	SAVE_ALL
+	movl $-ENOSYS,EAX(%esp)
 	cmpl _NR_syscalls,%eax
-	jae bad_sys_call
+	jae ret_from_sys_call
+	movl _current,%ebx
+	andl $~CF_MASK,EFLAGS(%esp)	# clear carry - assume no errors
+	movl $0,errno(%ebx)
+	testb $0x20,flags(%ebx)		# PF_TRACESYS
+	jne 1f
 	call _sys_call_table(,%eax,4)
 	movl %eax,EAX(%esp)		# save the return value
+	movl errno(%ebx),%edx
+	negl %edx
+	je ret_from_sys_call
+	movl %edx,EAX(%esp)
+	orl $(CF_MASK),EFLAGS(%esp)	# set carry to indicate error
+	jmp ret_from_sys_call
+.align 4
+1:	call _syscall_trace
+	movl ORIG_EAX(%esp),%eax
+	call _sys_call_table(,%eax,4)
+	movl %eax,EAX(%esp)		# save the return value
+	movl _current,%eax
+	movl errno(%eax),%edx
+	negl %edx
+	je 1f
+	movl %edx,EAX(%esp)
+	orl $(CF_MASK),EFLAGS(%esp)	# set carry to indicate error
+1:	call _syscall_trace
+
+	.align 4,0x90
 ret_from_sys_call:
-	cmpw $0x0f,CS(%esp)		# was old code segment supervisor ?
+	cmpl $0,_intr_count
 	jne 2f
-	cmpw $0x17,OLDSS(%esp)		# was stack segment = 0x17 ?
+	movl _bh_mask,%eax
+	andl _bh_active,%eax
+	jne handle_bottom_half
+9:	movl EFLAGS(%esp),%eax		# check VM86 flag: CS/SS are
+	testl $(VM_MASK),%eax		# different then
+	jne 1f
+	cmpw $(USER_CS),CS(%esp)	# was old code segment supervisor ?
 	jne 2f
-1:	movl _current,%eax
-	cmpl _task,%eax			# task[0] cannot have signals
-	je 2f
+	cmpw $(USER_DS),OLDSS(%esp)	# was stack segment user segment ?
+	jne 2f
+1:	sti
+	orl $(IF_MASK),%eax		# these just try to make sure
+	andl $~NT_MASK,%eax		# the program doesn't do anything
+	movl %eax,EFLAGS(%esp)		# stupid
 	cmpl $0,_need_resched
 	jne reschedule
+	movl _current,%eax
+	cmpl _task,%eax			# task[0] cannot have signals
+	je 2f
 	cmpl $0,state(%eax)		# state
 	jne reschedule
 	cmpl $0,counter(%eax)		# counter
 	je reschedule
-	movl signal(%eax),%ebx
 	movl blocked(%eax),%ecx
+	movl %ecx,%ebx			# save blocked in %ebx for signal handling
 	notl %ecx
-	andl %ebx,%ecx
-	bsfl %ecx,%ecx
-	je 2f
-	btrl %ecx,%ebx
-	movl %ebx,signal(%eax)
-	movl %esp,%ebx
-	pushl %ebx
-	incl %ecx
+	andl signal(%eax),%ecx
+	jne signal_return
+2:	RESTORE_ALL
+.align 4
+signal_return:
+	movl %esp,%ecx
 	pushl %ecx
+	testl $(VM_MASK),EFLAGS(%ecx)
+	jne v86_signal_return
+	pushl %ebx
 	call _do_signal
-	popl %ecx
 	popl %ebx
-	testl %eax, %eax
-	jne 1b			# see if we need to switch tasks, or do more signals
-2:	popl %ebx
-	popl %ecx
-	popl %edx
-	popl %esi
-	popl %edi
-	popl %ebp
-	popl %eax
-	pop %ds
-	pop %es
-	pop %fs
-	pop %gs
-	addl $4,%esp 		# skip the orig_eax
-	iret
-
-.align 2
-_irq13:
+	popl %ebx
+	RESTORE_ALL
+.align 4
+v86_signal_return:
+	call _save_v86_state
+	movl %eax,%esp
 	pushl %eax
-	xorb %al,%al
-	outb %al,$0xF0
-	movb $0x20,%al
-	outb %al,$0x20
-	jmp 1f
-1:	jmp 1f
-1:	outb %al,$0xA0
-	popl %eax
-_coprocessor_error:
-	pushl $-1		# mark this as an int. 
-	SAVE_ALL
-	pushl $ret_from_sys_call
-	jmp _math_error
+	pushl %ebx
+	call _do_signal
+	popl %ebx
+	popl %ebx
+	RESTORE_ALL
 
-.align 2
-_device_not_available:
-	pushl $-1		# mark this as an int
-	SAVE_ALL
-	pushl $ret_from_sys_call
-	clts				# clear TS so that we can use math
-	movl %cr0,%eax
-	testl $0x4,%eax			# EM (math emulation bit)
-	je _math_state_restore
-	pushl $0		# temporary storage for ORIG_EIP
-	call _math_emulate
-	addl $4,%esp
-	ret
-
-.align 2
-_keyboard_interrupt:
-	pushl $-1
-	SAVE_ALL
-	ACK_FIRST(0x02)
-	sti
-	call _do_keyboard
-	cli
-	UNBLK_FIRST(0x02)
-	jmp ret_from_sys_call
-
-.align 2
-_IRQ3_interrupt:
-	pushl $-1
-	SAVE_ALL
-	ACK_FIRST(0x08)
-	sti
-	call _do_IRQ3
-	cli
-	UNBLK_FIRST(0x08)
-	jmp ret_from_sys_call
-
-.align 2
-_IRQ4_interrupt:
-	pushl $-1
-	SAVE_ALL
-	ACK_FIRST(0x10)
-	sti
-	call _do_IRQ4
-	cli
-	UNBLK_FIRST(0x10)
-	jmp ret_from_sys_call
-
-.align 2
-_timer_interrupt:
-	pushl $-1		# mark this as an int
-	SAVE_ALL
-	ACK_FIRST(0x01)
-	sti
-	incl _jiffies
-	movl CS(%esp),%eax
-	andl $3,%eax		# %eax is CPL (0 or 3, 0=supervisor)
-	pushl %eax
-	call _do_timer		# 'do_timer(long CPL)' does everything from
-	addl $4,%esp		# task switching to accounting ...
-	cli
-	UNBLK_FIRST(0x01)
-	jmp ret_from_sys_call
-
-.align 2
-_hd_interrupt:
-	pushl $-1
-	SAVE_ALL
-	ACK_SECOND(0x40)
-	andl $0xfffeffff,_timer_active
-	xorl %edx,%edx
-	xchgl _do_hd,%edx
-	testl %edx,%edx
-	jne 1f
-	movl $_unexpected_hd_interrupt,%edx
-1:	call *%edx		# "interesting" way of handling intr.
-	cli
-	UNBLK_SECOND(0x40)
-	jmp ret_from_sys_call
-
-.align 2
-_sys_execve:
-	lea (EIP+4)(%esp),%eax  # don't forget about the return address.
-	pushl %eax
-	call _do_execve
-	addl $4,%esp
-	ret
-
+.align 4
 _divide_error:
-	pushl $0 		# no error code
+	pushl $0		# no error code
 	pushl $_do_divide_error
+.align 4,0x90
 error_code:
 	push %fs
 	push %es
@@ -335,81 +262,115 @@ error_code:
 	mov %gs,%bx			# get the lower order bits of gs
 	xchgl %ebx, GS(%esp)		# get the address and save gs.
 	pushl %eax			# push the error code
-	lea 52(%esp),%edx
+	lea 4(%esp),%edx
 	pushl %edx
-	movl $0x10,%edx
+	movl $(KERNEL_DS),%edx
 	mov %dx,%ds
 	mov %dx,%es
-	movl $0x17,%edx
+	movl $(USER_DS),%edx
 	mov %dx,%fs
 	call *%ebx
 	addl $8,%esp
 	jmp ret_from_sys_call
 
-_debug:
+.align 4
+_coprocessor_error:
 	pushl $0
-	pushl $_do_int3		# _do_debug
+	pushl $_do_coprocessor_error
 	jmp error_code
 
+.align 4
+_device_not_available:
+	pushl $-1		# mark this as an int
+	SAVE_ALL
+	pushl $ret_from_sys_call
+	movl %cr0,%eax
+	testl $0x4,%eax			# EM (math emulation bit)
+	je _math_state_restore
+	pushl $0		# temporary storage for ORIG_EIP
+	call _math_emulate
+	addl $4,%esp
+	ret
+
+.align 4
+_debug:
+	pushl $0
+	pushl $_do_debug
+	jmp error_code
+
+.align 4
 _nmi:
 	pushl $0
 	pushl $_do_nmi
 	jmp error_code
 
+.align 4
 _int3:
 	pushl $0
 	pushl $_do_int3
 	jmp error_code
 
+.align 4
 _overflow:
 	pushl $0
 	pushl $_do_overflow
 	jmp error_code
 
+.align 4
 _bounds:
 	pushl $0
 	pushl $_do_bounds
 	jmp error_code
 
+.align 4
 _invalid_op:
 	pushl $0
 	pushl $_do_invalid_op
 	jmp error_code
 
+.align 4
 _coprocessor_segment_overrun:
 	pushl $0
 	pushl $_do_coprocessor_segment_overrun
 	jmp error_code
 
+.align 4
 _reserved:
 	pushl $0
 	pushl $_do_reserved
 	jmp error_code
 
+.align 4
 _double_fault:
 	pushl $_do_double_fault
 	jmp error_code
 
+.align 4
 _invalid_TSS:
 	pushl $_do_invalid_TSS
 	jmp error_code
 
+.align 4
 _segment_not_present:
 	pushl $_do_segment_not_present
 	jmp error_code
 
+.align 4
 _stack_segment:
 	pushl $_do_stack_segment
 	jmp error_code
 
+.align 4
 _general_protection:
 	pushl $_do_general_protection
 	jmp error_code
 
+.align 4
 _alignment_check:
 	pushl $_do_alignment_check
 	jmp error_code
 
+.align 4
 _page_fault:
 	pushl $_do_page_fault
 	jmp error_code

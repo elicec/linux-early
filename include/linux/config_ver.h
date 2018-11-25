@@ -1,1 +1,0 @@
-#define UTS_VERSION "06/20/92"

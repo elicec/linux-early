@@ -1,30 +1,36 @@
 /*
  *  linux/fs/minix/dir.c
  *
- *  (C) 1991 Linus Torvalds
+ *  Copyright (C) 1991, 1992 Linus Torvalds
  *
  *  minix directory handling functions
  */
 
-#include <errno.h>
-
 #include <asm/segment.h>
 
+#include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/minix_fs.h>
 #include <linux/stat.h>
+
+static int minix_dir_read(struct inode * inode, struct file * filp, char * buf, int count)
+{
+	return -EISDIR;
+}
 
 static int minix_readdir(struct inode *, struct file *, struct dirent *, int);
 
 static struct file_operations minix_dir_operations = {
 	NULL,			/* lseek - default */
-	minix_file_read,	/* read */
+	minix_dir_read,		/* read */
 	NULL,			/* write - bad */
 	minix_readdir,		/* readdir */
 	NULL,			/* select - default */
 	NULL,			/* ioctl - default */
+	NULL,			/* mmap */
 	NULL,			/* no special open code */
-	NULL			/* no special release code */
+	NULL,			/* no special release code */
+	file_fsync		/* default fsync */
 };
 
 /*
@@ -43,36 +49,39 @@ struct inode_operations minix_dir_inode_operations = {
 	minix_rename,		/* rename */
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
-	minix_bmap,		/* bmap */
-	minix_truncate		/* truncate */
+	NULL,			/* bmap */
+	minix_truncate,		/* truncate */
+	NULL			/* permission */
 };
 
 static int minix_readdir(struct inode * inode, struct file * filp,
 	struct dirent * dirent, int count)
 {
-	unsigned int block,offset,i;
+	unsigned int offset,i;
 	char c;
 	struct buffer_head * bh;
 	struct minix_dir_entry * de;
+	struct minix_sb_info * info;
 
-	if (!inode || !S_ISDIR(inode->i_mode))
+	if (!inode || !inode->i_sb || !S_ISDIR(inode->i_mode))
 		return -EBADF;
-	if (filp->f_pos & (sizeof (struct minix_dir_entry) - 1))
+	info = &inode->i_sb->u.minix_sb;
+	if (filp->f_pos & (info->s_dirsize - 1))
 		return -EBADF;
 	while (filp->f_pos < inode->i_size) {
 		offset = filp->f_pos & 1023;
-		block = minix_bmap(inode,(filp->f_pos)>>BLOCK_SIZE_BITS);
-		if (!block || !(bh = bread(inode->i_dev,block))) {
+		bh = minix_bread(inode,(filp->f_pos)>>BLOCK_SIZE_BITS,0);
+		if (!bh) {
 			filp->f_pos += 1024-offset;
 			continue;
 		}
-		de = (struct minix_dir_entry *) (offset + bh->b_data);
 		while (offset < 1024 && filp->f_pos < inode->i_size) {
-			offset += sizeof (struct minix_dir_entry);
-			filp->f_pos += sizeof (struct minix_dir_entry);
+			de = (struct minix_dir_entry *) (offset + bh->b_data);
+			offset += info->s_dirsize;
+			filp->f_pos += info->s_dirsize;
 			if (de->inode) {
-				for (i = 0; i < MINIX_NAME_LEN; i++)
-					if (c = de->name[i])
+				for (i = 0; i < info->s_namelen; i++)
+					if ((c = de->name[i]) != 0)
 						put_fs_byte(c,i+dirent->d_name);
 					else
 						break;
@@ -84,7 +93,6 @@ static int minix_readdir(struct inode * inode, struct file * filp,
 					return i;
 				}
 			}
-			de++;
 		}
 		brelse(bh);
 	}

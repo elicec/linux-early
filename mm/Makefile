@@ -7,20 +7,12 @@
 #
 # Note 2! The CFLAGS definition is now in the main makefile...
 
-AS	=as
-AR	=ar
-LD	=ld
-CC	=gcc -nostdinc -I../include
-CPP	=cpp -nostdinc -I../include
-
 .c.o:
-	$(CC) $(CFLAGS) \
-	-c -o $*.o $<
+	$(CC) $(CFLAGS) -c $<
 .s.o:
 	$(AS) -o $*.o $<
 .c.s:
-	$(CC) $(CFLAGS) \
-	-S -o $*.s $<
+	$(CC) $(CFLAGS) -S $<
 
 OBJS	= memory.o swap.o mmap.o
 
@@ -28,26 +20,14 @@ mm.o: $(OBJS)
 	$(LD) -r -o mm.o $(OBJS)
 
 clean:
-	rm -f core *.o *.a tmp_make
-	for i in *.c;do rm -f `basename $$i .c`.s;done
+	rm -f core *.o *.a *.s
 
 dep:
-	sed '/\#\#\# Dependencies/q' < Makefile > tmp_make
-	(for i in *.c;do $(CPP) -M $$i;done) >> tmp_make
-	cp tmp_make Makefile
+	$(CPP) -M *.c > .depend
 
-### Dependencies:
-memory.o : memory.c ../include/signal.h ../include/sys/types.h ../include/asm/system.h \
-  ../include/linux/sched.h ../include/linux/head.h ../include/linux/fs.h ../include/sys/dirent.h \
-  ../include/limits.h ../include/sys/vfs.h ../include/linux/mm.h ../include/linux/kernel.h \
-  ../include/sys/param.h ../include/sys/time.h ../include/time.h ../include/sys/resource.h 
-mmap.o : mmap.c ../include/linux/stat.h ../include/linux/sched.h ../include/linux/head.h \
-  ../include/linux/fs.h ../include/sys/types.h ../include/sys/dirent.h ../include/limits.h \
-  ../include/sys/vfs.h ../include/linux/mm.h ../include/linux/kernel.h ../include/signal.h \
-  ../include/sys/param.h ../include/sys/time.h ../include/time.h ../include/sys/resource.h \
-  ../include/asm/segment.h ../include/asm/system.h ../include/errno.h ../include/sys/mman.h 
-swap.o : swap.c ../include/errno.h ../include/linux/stat.h ../include/linux/mm.h \
-  ../include/linux/fs.h ../include/sys/types.h ../include/sys/dirent.h ../include/limits.h \
-  ../include/sys/vfs.h ../include/linux/kernel.h ../include/signal.h ../include/linux/string.h \
-  ../include/linux/sched.h ../include/linux/head.h ../include/sys/param.h ../include/sys/time.h \
-  ../include/time.h ../include/sys/resource.h 
+#
+# include a dependency file if one exists
+#
+ifeq (.depend,$(wildcard .depend))
+include .depend
+endif

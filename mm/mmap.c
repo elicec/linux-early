@@ -6,10 +6,13 @@
 #include <linux/stat.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
+#include <linux/mm.h>
+#include <linux/errno.h>
+#include <linux/mman.h>
+#include <linux/string.h>
+
 #include <asm/segment.h>
 #include <asm/system.h>
-#include <errno.h>
-#include <sys/mman.h>
 
 /*
  * description of effects of mapping type and prot in current implementation.
@@ -26,85 +29,18 @@
  *		w: (no) copy	w: (no) copy	w: (copy) copy	w: (no) no
  *		x: (no) no	x: (no) no	x: (no) no	x: (yes) no
  *
- * the permissions are encoded as cxwr (copy,exec,write,read)
  */
-#define MTYP(T) ((T) & MAP_TYPE)
-#define PREAD(T,P) (((P) & PROT_READ) ? 1 : 0)
-#define PWRITE(T,P) (((P) & PROT_WRITE) ? (MTYP(T) == MAP_SHARED ? 2 : 10) : 0)
-#define PEXEC(T,P) (((P) & PROT_EXEC) ? 4 : 0)
-#define PERMISS(T,P) (PREAD(T,P)|PWRITE(T,P)|PEXEC(T,P))
 
 #define CODE_SPACE(addr) ((((addr)+4095)&~4095) < \
 			  current->start_code + current->end_code)
 
-extern int remap_page_range(unsigned long from, unsigned long to,
-			    unsigned long size, int permiss);
-extern int unmap_page_range(unsigned long from, unsigned long size);
-
-static caddr_t
-mmap_chr(unsigned long addr, size_t len, int prot, int flags,
-	 struct inode *inode, unsigned long off)
+int do_mmap(struct file * file, unsigned long addr, unsigned long len,
+	unsigned long prot, unsigned long flags, unsigned long off)
 {
-	int major, minor;
-	extern unsigned long HIGH_MEMORY;
+	int mask, error;
 
-	major = MAJOR(inode->i_rdev);
-	minor = MINOR(inode->i_rdev);
-
-	/*
-	 * for character devices, only /dev/mem may be mapped. when the
-	 * swapping code is modified to allow arbitrary sources of pages,
-	 * then we can open it up to regular files.
-	 */
-
-	if (major != 1 || minor != 1)
-		return (caddr_t)-ENODEV;
-
-	/*
-	 * we only allow mappings from address 0 to HIGH_MEMORY, since thats
-	 * the range of our memory [actually this is a lie. the buffer cache
-	 * and ramdisk occupy higher memory, but the paging stuff won't
-	 * let us map to it anyway, so we break it here].
-	 *
-	 * this call is very dangerous! because of the lack of adequate
-	 * tagging of frames, it is possible to mmap over a frame belonging
-	 * to another (innocent) process. with MAP_SHARED|MAP_WRITE, this
-	 * rogue process can trample over the other's data! we ignore this :{
-	 * for now, we hope people will malloc the required amount of space,
-	 * then mmap over it. the mm needs serious work before this can be
-	 * truly useful.
-	 */
-
-	if (len > HIGH_MEMORY || off > HIGH_MEMORY - len) /* avoid overflow */
-		return (caddr_t)-ENXIO;
-
-	if (remap_page_range(addr, off, len, PERMISS(flags, prot)))
-		return (caddr_t)-EAGAIN;
-	
-	return (caddr_t)addr;
-}
-
-caddr_t
-sys_mmap(unsigned long *buffer)
-{
-	unsigned long base, addr;
-	unsigned long len, limit, off;
-	int prot, flags, fd;
-	struct file *file;
-	struct inode *inode;
-
-	addr = (unsigned long)	get_fs_long(buffer);	/* user address space*/
-	len = (size_t)		get_fs_long(buffer+1);	/* nbytes of mapping */
-	prot = (int)		get_fs_long(buffer+2);	/* protection */
-	flags = (int)		get_fs_long(buffer+3);	/* mapping type */
-	fd = (int) 		get_fs_long(buffer+4);	/* object to map */
-	off = (unsigned long)	get_fs_long(buffer+5);	/* offset in object */
-
-	if (fd >= NR_OPEN || fd < 0 || !(file = current->filp[fd]))
-		return (caddr_t) -EBADF;
-	if (addr > TASK_SIZE || (addr+(unsigned long) len) > TASK_SIZE)
-		return (caddr_t) -EINVAL;
-	inode = file->f_inode;
+	if (addr > TASK_SIZE || len > TASK_SIZE || addr > TASK_SIZE-len)
+		return -EINVAL;
 
 	/*
 	 * do simple checking here so the lower-level routines won't have
@@ -115,53 +51,46 @@ sys_mmap(unsigned long *buffer)
 	switch (flags & MAP_TYPE) {
 	case MAP_SHARED:
 		if ((prot & PROT_WRITE) && !(file->f_mode & 2))
-			return (caddr_t)-EINVAL;
+			return -EINVAL;
 		/* fall through */
 	case MAP_PRIVATE:
 		if (!(file->f_mode & 1))
-			return (caddr_t)-EINVAL;
+			return -EINVAL;
 		break;
 
 	default:
-		return (caddr_t)-EINVAL;
+		return -EINVAL;
 	}
 
 	/*
 	 * obtain the address to map to. we verify (or select) it and ensure
-	 * that it represents a valid section of the address space. we assume
-	 * that if PROT_EXEC is specified this should be in the code segment.
+	 * that it represents a valid section of the address space.
 	 */
-	if (prot & PROT_EXEC) {
-		base = get_base(current->ldt[1]);	/* cs */
-		limit = get_limit(0x0f);		/* cs limit */
-	} else {
-		base = get_base(current->ldt[2]);	/* ds */
-		limit = get_limit(0x17);		/* ds limit */
-	}
 
 	if (flags & MAP_FIXED) {
-		/*
-		 * if MAP_FIXED is specified, we have to map exactly at this
-		 * address. it must be page aligned and not ambiguous.
-		 */
-		if ((addr & 0xfff) || addr > 0x7fffffff || addr == 0 ||
-		    (off & 0xfff))
-			return (caddr_t)-EINVAL;
-		if (addr + len > limit)
-			return (caddr_t)-ENOMEM;
+		if ((addr & 0xfff) || addr == 0)
+			return -EINVAL;
+		if (len > TASK_SIZE || addr > TASK_SIZE - len)
+			return -ENOMEM;
 	} else {
-		/*
-		 * we're given a hint as to where to put the address.
-		 * that we still need to search for a range of pages which
-		 * are not mapped and which won't impact the stack or data
-		 * segment.
-		 * in linux, we only have a code segment and data segment.
-		 * since data grows up and stack grows down, we're sort of
-		 * stuck. placing above the data will break malloc, below
-		 * the stack will cause stack overflow. because of this
-		 * we don't allow nonspecified mappings...
-		 */
-		return (caddr_t)-ENOMEM;
+		struct vm_area_struct * vmm;
+
+		/* Maybe this works.. Ugly it is. */
+		addr = 0x40000000;
+		while (addr+len < 0x60000000) {
+			for (vmm = current->mmap ; vmm ; vmm = vmm->vm_next) {
+				if (addr >= vmm->vm_end)
+					continue;
+				if (addr + len <= vmm->vm_start)
+					continue;
+				addr = (vmm->vm_end + 0xfff) & 0xfffff000;
+				break;
+			}
+			if (!vmm)
+				break;
+		}
+		if (addr+len >= 0x60000000)
+			return -ENOMEM;
 	}
 
 	/*
@@ -169,28 +98,153 @@ sys_mmap(unsigned long *buffer)
 	 * specific mapper. the address has already been validated, but
 	 * not unmapped
 	 */
-	if (S_ISCHR(inode->i_mode))
-		addr = (unsigned long)mmap_chr(base + addr, len, prot, flags,
-					       inode, off);
-	else
-		addr = (unsigned long)-ENODEV;
-	if ((long)addr > 0)
-		addr -= base;
+	if (!file->f_op || !file->f_op->mmap)
+		return -ENODEV;
+	mask = 0;
+	if (prot & (PROT_READ | PROT_EXEC))
+		mask |= PAGE_READONLY;
+	if (prot & PROT_WRITE)
+		if ((flags & MAP_TYPE) == MAP_PRIVATE)
+			mask |= PAGE_COW;
+		else
+			mask |= PAGE_RW;
+	if (!mask)
+		return -EINVAL;
 
-	return (caddr_t)addr;
+	error = file->f_op->mmap(file->f_inode, file, addr, len, mask, off);
+	if (!error)
+		return addr;
+
+	if (!current->errno)
+		current->errno = -error;
+	return -1;
 }
 
-int sys_munmap(unsigned long addr, size_t len)
+extern "C" int sys_mmap(unsigned long *buffer)
 {
-	unsigned long base, limit;
+	unsigned long fd;
+	struct file * file;
 
-	base = get_base(current->ldt[2]);	/* map into ds */
-	limit = get_limit(0x17);		/* ds limit */
+	fd = get_fs_long(buffer+4);
+	if (fd >= NR_OPEN || !(file = current->filp[fd]))
+		return -EBADF;
+	return do_mmap(file, get_fs_long(buffer), get_fs_long(buffer+1),
+		get_fs_long(buffer+2), get_fs_long(buffer+3), get_fs_long(buffer+5));
+}
 
-	if ((addr & 0xfff) || addr > 0x7fffffff || addr == 0 ||
-	    addr + len > limit)
+extern "C" int sys_munmap(unsigned long addr, size_t len)
+{
+	struct vm_area_struct *mpnt, **p, *free;
+
+	if ((addr & 0xfff) || addr > 0x7fffffff || addr == 0 || addr + len > TASK_SIZE)
 		return -EINVAL;
-	if (unmap_page_range(base + addr, len))
-		return -EAGAIN; /* should never happen */
+
+	/* This needs a bit of work - we need to figure out how to
+	   deal with areas that overlap with something that we are using */
+
+	p = &current->mmap;
+	free = NULL;
+	/*
+	 * Check if this memory area is ok - put it on the temporary
+	 * list if so..
+	 */
+	while ((mpnt = *p) != NULL) {
+		if (addr > mpnt->vm_start && addr < mpnt->vm_end)
+			goto bad_munmap;
+		if (addr+len > mpnt->vm_start && addr + len < mpnt->vm_end)
+			goto bad_munmap;
+		if (addr <= mpnt->vm_start && addr + len >= mpnt->vm_end) {
+			*p = mpnt->vm_next;
+			mpnt->vm_next = free;
+			free = mpnt;
+			continue;
+		}
+		p = &mpnt->vm_next;
+	}
+	/*
+	 * Ok - we have the memory areas we should free on the 'free' list,
+	 * so release them, and unmap the page range..
+	 */
+	while (free) {
+		mpnt = free;
+		free = free->vm_next;
+		if (mpnt->vm_ops->close)
+			mpnt->vm_ops->close(mpnt);
+		kfree(mpnt);
+	}
+
+	unmap_page_range(addr, len);
+	return 0;
+bad_munmap:
+/*
+ * the arguments we got were bad: put the temporary list back into the mmap list
+ */
+	while (free) {
+		mpnt = free;
+		free = free->vm_next;
+		mpnt->vm_next = current->mmap;
+		current->mmap = mpnt;
+	}
+	return -EINVAL;
+}
+
+/* This is used for a general mmap of a disk file */
+int generic_mmap(struct inode * inode, struct file * file,
+	unsigned long addr, size_t len, int prot, unsigned long off)
+{
+  	struct vm_area_struct * mpnt;
+	extern struct vm_operations_struct file_mmap;
+	struct buffer_head * bh;
+
+	if (off & (inode->i_sb->s_blocksize - 1))
+		return -EINVAL;
+
+	if (len > high_memory || off > high_memory - len) /* avoid overflow */
+		return -ENXIO;
+
+	if (get_limit(USER_DS)  != TASK_SIZE)
+		return -EINVAL;
+
+	if (!inode->i_sb || !S_ISREG(inode->i_mode) || !permission(inode,MAY_READ)) {
+		iput(inode);
+		return -EACCES;
+	}
+	if (!inode->i_op || !inode->i_op->bmap) {
+		iput(inode);
+		return -ENOEXEC;
+	}
+	if (!(bh = bread(inode->i_dev,bmap(inode,0),inode->i_sb->s_blocksize))) {
+		iput(inode);
+		return -EACCES;
+	}
+	if (!IS_RDONLY(inode)) {
+		inode->i_atime = CURRENT_TIME;
+		inode->i_dirt = 1;
+	}
+	brelse(bh);
+
+	mpnt = (struct vm_area_struct * ) kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
+	if (!mpnt){
+		iput(inode);
+		return -ENOMEM;
+	}
+
+	unmap_page_range(addr, len);	
+	mpnt->vm_task = current;
+	mpnt->vm_start = addr;
+	mpnt->vm_end = addr + len;
+	mpnt->vm_page_prot = prot;
+	mpnt->vm_share = NULL;
+	mpnt->vm_inode = inode;
+	inode->i_count++;
+	mpnt->vm_offset = off;
+	mpnt->vm_ops = &file_mmap;
+	mpnt->vm_next = current->mmap;
+	current->mmap = mpnt;
+#if 0
+	printk("VFS: Loaded mmap at %08x -  %08x\n",
+		mpnt->vm_start,	mpnt->vm_end);
+#endif
 	return 0;
 }
+

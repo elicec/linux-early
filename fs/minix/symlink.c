@@ -1,22 +1,21 @@
 /*
  *  linux/fs/minix/symlink.c
  *
- *  (C) 1991 Linus Torvalds
+ *  Copyright (C) 1991, 1992  Linus Torvalds
  *
  *  minix symlink handling code
  */
 
-#include <errno.h>
-
 #include <asm/segment.h>
 
+#include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/fs.h>
 #include <linux/minix_fs.h>
 #include <linux/stat.h>
 
 static int minix_readlink(struct inode *, char *, int);
-static struct inode * minix_follow_link(struct inode *, struct inode *);
+static int minix_follow_link(struct inode *, struct inode *, int, int, struct inode **);
 
 /*
  * symlinks can't do much...
@@ -35,41 +34,46 @@ struct inode_operations minix_symlink_inode_operations = {
 	minix_readlink,		/* readlink */
 	minix_follow_link,	/* follow_link */
 	NULL,			/* bmap */
-	NULL			/* truncate */
+	NULL,			/* truncate */
+	NULL			/* permission */
 };
 
-static struct inode * minix_follow_link(struct inode * dir, struct inode * inode)
+static int minix_follow_link(struct inode * dir, struct inode * inode,
+	int flag, int mode, struct inode ** res_inode)
 {
-	unsigned short fs;
+	int error;
 	struct buffer_head * bh;
 
+	*res_inode = NULL;
 	if (!dir) {
 		dir = current->root;
 		dir->i_count++;
 	}
 	if (!inode) {
 		iput(dir);
-		return NULL;
+		return -ENOENT;
 	}
 	if (!S_ISLNK(inode->i_mode)) {
 		iput(dir);
-		return inode;
+		*res_inode = inode;
+		return 0;
 	}
-	__asm__("mov %%fs,%0":"=r" (fs));
-	if ((current->link_count > 5) || !inode->i_data[0] ||
-	   !(bh = bread(inode->i_dev, inode->i_data[0]))) {
-		iput(dir);
+	if (current->link_count > 5) {
 		iput(inode);
-		return NULL;
+		iput(dir);
+		return -ELOOP;
+	}
+	if (!(bh = minix_bread(inode, 0, 0))) {
+		iput(inode);
+		iput(dir);
+		return -EIO;
 	}
 	iput(inode);
-	__asm__("mov %0,%%fs"::"r" ((unsigned short) 0x10));
 	current->link_count++;
-	inode = _namei(bh->b_data,dir,1);
+	error = open_namei(bh->b_data,flag,mode,res_inode,dir);
 	current->link_count--;
-	__asm__("mov %0,%%fs"::"r" (fs));
 	brelse(bh);
-	return inode;
+	return error;
 }
 
 static int minix_readlink(struct inode * inode, char * buffer, int buflen)
@@ -84,10 +88,7 @@ static int minix_readlink(struct inode * inode, char * buffer, int buflen)
 	}
 	if (buflen > 1023)
 		buflen = 1023;
-	if (inode->i_data[0])
-		bh = bread(inode->i_dev, inode->i_data[0]);
-	else
-		bh = NULL;
+	bh = minix_bread(inode, 0, 0);
 	iput(inode);
 	if (!bh)
 		return 0;

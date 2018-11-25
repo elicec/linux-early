@@ -1,18 +1,25 @@
 /*
  *  linux/kernel/chr_drv/mem.c
  *
- *  (C) 1991  Linus Torvalds
+ *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
-#include <errno.h>
-#include <sys/types.h>
-
+#include <linux/types.h>
+#include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/tty.h>
+#include <linux/mouse.h>
+#include <linux/tpqic02.h>
+
+#include <linux/user.h>
+#include <linux/a.out.h>
+#include <linux/string.h>
 
 #include <asm/segment.h>
 #include <asm/io.h>
+
+extern long soundcard_init(long mem_start);
 
 static int read_ram(struct inode * inode, struct file * file,char * buf, int count)
 {
@@ -24,106 +31,111 @@ static int write_ram(struct inode * inode, struct file * file,char * buf, int co
 	return -EIO;
 }
 
-static int read_mem(struct inode * inode, struct file * file,char * buf, int count)
+static int read_core(struct inode * inode, struct file * file,char * buf, int count)
 {
-	unsigned long addr;
-	char *tmp;
-	unsigned long pde, pte, page;
-	int i;
+	unsigned long p = file->f_pos;
+	int read;
+	int count1;
+	char * pnt;
+	struct user dump;
+
+	memset(&dump, 0, sizeof(struct user));
+	dump.magic = CMAGIC;
+	dump.u_dsize = high_memory >> 12;
 
 	if (count < 0)
 		return -EINVAL;
-	addr = file->f_pos;
-	tmp = buf;
-	while (count > 0) {
-		pde = (unsigned long) pg_dir + (addr >> 20 & 0xffc);
-		if (!((pte = *((unsigned long *) pde)) & 1))
-			break;
-		pte &= 0xfffff000;
-		pte += (addr >> 10) & 0xffc;
-		if (((page = *((unsigned long *) pte)) & 1) == 0)
-			break;
-/*
-		if ((page & 2) == 0)
-			un_wp_page((unsigned long *) pte);
-*/
-		page &= 0xfffff000;
-		page += addr & 0xfff;
-		i = 4096-(addr & 0xfff);
-		if (i > count)
-			i = count;
-		memcpy_tofs(tmp,(void *) page,i);
-		addr += i;
-		tmp += i;
-		count -= i;
+	if (p >= high_memory)
+		return 0;
+	if (count > high_memory - p)
+		count = high_memory - p;
+	read = 0;
+
+	if (p < sizeof(struct user) && count > 0) {
+		count1 = count;
+		if (p + count1 > sizeof(struct user))
+			count1 = sizeof(struct user)-p;
+		pnt = (char *) &dump + p;
+		memcpy_tofs(buf,(void *) pnt, count1);
+		buf += count1;
+		p += count1;
+		count -= count1;
+		read += count1;
 	}
-	file->f_pos = addr;
-	return tmp-buf;
+
+	while (p < (4096 + 4096) && count > 0) {
+		put_fs_byte(0,buf);
+		buf++;
+		p++;
+		count--;
+		read++;
+	}
+	memcpy_tofs(buf,(void *) (p - 4096),count);
+	read += count;
+	file->f_pos += read;
+	return read;
+}
+
+static int read_mem(struct inode * inode, struct file * file,char * buf, int count)
+{
+	unsigned long p = file->f_pos;
+	int read;
+
+	if (count < 0)
+		return -EINVAL;
+	if (p >= high_memory)
+		return 0;
+	if (count > high_memory - p)
+		count = high_memory - p;
+	read = 0;
+	while (p < 4096 && count > 0) {
+		put_fs_byte(0,buf);
+		buf++;
+		p++;
+		count--;
+		read++;
+	}
+	memcpy_tofs(buf,(void *) p,count);
+	read += count;
+	file->f_pos += read;
+	return read;
 }
 
 static int write_mem(struct inode * inode, struct file * file,char * buf, int count)
 {
-	unsigned long addr;
-	char *tmp;
-	unsigned long pde, pte, page;
-	int i;
+	unsigned long p = file->f_pos;
+	int written;
 
 	if (count < 0)
 		return -EINVAL;
-	addr = file->f_pos;
-	tmp = buf;
-	while (count > 0) {
-		pde = (unsigned long) pg_dir + (addr >> 20 & 0xffc);
-		if (!((pte = *((unsigned long *) pde)) & 1))
-			break;
-		pte &= 0xfffff000;
-		pte += (addr >> 10) & 0xffc;
-		if (((page = *((unsigned long *) pte)) & 1) == 0)
-			break;
-		if ((page & 2) == 0)
-			un_wp_page((unsigned long *) pte);
-		page &= 0xfffff000;
-		page += addr & 0xfff;
-		i = 4096-(addr & 0xfff);
-		if (i > count)
-			i = count;
-		memcpy_fromfs((void *) page,tmp,i);
-		addr += i;
-		tmp += i;
-		count -= i;
+	if (p >= high_memory)
+		return 0;
+	if (count > high_memory - p)
+		count = high_memory - p;
+	written = 0;
+	while (p < 4096 && count > 0) {
+		/* Hmm. Do something? */
+		buf++;
+		p++;
+		count--;
+		written++;
 	}
-	file->f_pos = addr;
-	return tmp-buf;
-}
-
-static int read_kmem(struct inode * inode, struct file * file,char * buf, int count)
-{
-	unsigned long p = file->f_pos;
-
-	if (count < 0)
-		return -EINVAL;
-	if (p >= HIGH_MEMORY)
-		return 0;
-	if (count > HIGH_MEMORY - p)
-		count = HIGH_MEMORY - p;
-	memcpy_tofs(buf,(void *) p,count);
-	file->f_pos += count;
-	return count;
-}
-
-static int write_kmem(struct inode * inode, struct file * file,char * buf, int count)
-{
-	unsigned long p = file->f_pos;
-
-	if (count < 0)
-		return -EINVAL;
-	if (p >= HIGH_MEMORY)
-		return 0;
-	if (count > HIGH_MEMORY - p)
-		count = HIGH_MEMORY - p;
 	memcpy_fromfs((void *) p,buf,count);
-	file->f_pos += count;
+	written += count;
+	file->f_pos += written;
 	return count;
+}
+
+static int mmap_mem(struct inode * inode, struct file * file,
+	unsigned long addr, size_t len, int prot, unsigned long off)
+{
+	if (off & 0xfff || off + len < off)
+		return -ENXIO;
+
+	if (remap_page_range(addr, off, len, prot))
+		return -EAGAIN;
+	
+	return 0;
 }
 
 static int read_port(struct inode * inode,struct file * file,char * buf, int count)
@@ -154,7 +166,17 @@ static int write_port(struct inode * inode,struct file * file,char * buf, int co
 	return tmp-buf;
 }
 
-static int read_zero(struct inode *node,struct file *file,char *buf,int count)
+static int read_null(struct inode * node,struct file * file,char * buf,int count)
+{
+	return 0;
+}
+
+static int write_null(struct inode * inode,struct file * file,char * buf, int count)
+{
+	return count;
+}
+
+static int read_zero(struct inode * node,struct file * file,char * buf,int count)
 {
 	int left;
 
@@ -165,6 +187,21 @@ static int read_zero(struct inode *node,struct file *file,char *buf,int count)
 	return count;
 }
 
+static int write_zero(struct inode * inode,struct file * file,char * buf, int count)
+{
+	return count;
+}
+
+static int mmap_zero(struct inode * inode, struct file * file,
+	unsigned long addr, size_t len, int prot, unsigned long off)
+{
+	if (prot & PAGE_RW)
+		return -EINVAL;
+	if (zeromap_page_range(addr, len, prot))
+		return -EAGAIN;
+	return 0;
+}
+
 /*
  * The memory devices use the full 32 bits of the offset, and so we cannot
  * check against negative addresses: they are ok. The return value is weird,
@@ -173,7 +210,7 @@ static int read_zero(struct inode *node,struct file *file,char *buf,int count)
  * also note that seeking relative to the "end of file" isn't supported:
  * it has no meaning, so it returns -EINVAL.
  */
-static int mem_lseek(struct inode * inode, struct file * file, off_t offset, int orig)
+static int memory_lseek(struct inode * inode, struct file * file, off_t offset, int orig)
 {
 	switch (orig) {
 		case 0:
@@ -190,61 +227,155 @@ static int mem_lseek(struct inode * inode, struct file * file, off_t offset, int
 	return file->f_pos;
 }
 
-static int mem_read(struct inode * inode, struct file * file, char * buf, int count)
-{
-	switch (MINOR(inode->i_rdev)) {
-		case 0:
-			return read_ram(inode,file,buf,count);
-		case 1:
-			return read_mem(inode,file,buf,count);
-		case 2:
-			return read_kmem(inode,file,buf,count);
-		case 3:
-			return 0;	/* /dev/null */
-		case 4:
-			return read_port(inode,file,buf,count);
-		case 5:
-			return read_zero(inode,file,buf,count);
-		default:
-			return -ENODEV;
-	}
-}
+#define read_kmem read_mem
+#define write_kmem write_mem
+#define mmap_kmem mmap_mem
 
-static int mem_write(struct inode * inode, struct file * file, char * buf, int count)
-{
-	switch (MINOR(inode->i_rdev)) {
-		case 0:
-			return write_ram(inode,file,buf,count);
-		case 1:
-			return write_mem(inode,file,buf,count);
-		case 2:
-			return write_kmem(inode,file,buf,count);
-		case 3:
-			return count;	/* /dev/null */
-		case 4:
-			return write_port(inode,file,buf,count);
-		case 5:
-			return count; /* /dev/zero */
-		default:
-			return -ENODEV;
-	}
-}
+static struct file_operations ram_fops = {
+	memory_lseek,
+	read_ram,
+	write_ram,
+	NULL,		/* ram_readdir */
+	NULL,		/* ram_select */
+	NULL,		/* ram_ioctl */
+	NULL,		/* ram_mmap */
+	NULL,		/* no special open code */
+	NULL,		/* no special release code */
+	NULL		/* fsync */
+};
 
 static struct file_operations mem_fops = {
-	mem_lseek,
-	mem_read,
-	mem_write,
+	memory_lseek,
+	read_mem,
+	write_mem,
 	NULL,		/* mem_readdir */
 	NULL,		/* mem_select */
 	NULL,		/* mem_ioctl */
+	mmap_mem,
+	NULL,		/* no special open code */
+	NULL,		/* no special release code */
+	NULL		/* fsync */
+};
+
+static struct file_operations kmem_fops = {
+	memory_lseek,
+	read_kmem,
+	write_kmem,
+	NULL,		/* kmem_readdir */
+	NULL,		/* kmem_select */
+	NULL,		/* kmem_ioctl */
+	mmap_kmem,
+	NULL,		/* no special open code */
+	NULL,		/* no special release code */
+	NULL		/* fsync */
+};
+
+static struct file_operations null_fops = {
+	memory_lseek,
+	read_null,
+	write_null,
+	NULL,		/* null_readdir */
+	NULL,		/* null_select */
+	NULL,		/* null_ioctl */
+	NULL,		/* null_mmap */
+	NULL,		/* no special open code */
+	NULL,		/* no special release code */
+	NULL		/* fsync */
+};
+
+static struct file_operations port_fops = {
+	memory_lseek,
+	read_port,
+	write_port,
+	NULL,		/* port_readdir */
+	NULL,		/* port_select */
+	NULL,		/* port_ioctl */
+	NULL,		/* port_mmap */
+	NULL,		/* no special open code */
+	NULL,		/* no special release code */
+	NULL		/* fsync */
+};
+
+static struct file_operations zero_fops = {
+	memory_lseek,
+	read_zero,
+	write_zero,
+	NULL,		/* zero_readdir */
+	NULL,		/* zero_select */
+	NULL,		/* zero_ioctl */
+	mmap_zero,
 	NULL,		/* no special open code */
 	NULL		/* no special release code */
 };
 
-long chr_dev_init(long kmem_start)
+static struct file_operations core_fops = {
+	memory_lseek,
+	read_core,
+	NULL,
+	NULL,		/* zero_readdir */
+	NULL,		/* zero_select */
+	NULL,		/* zero_ioctl */
+	NULL,		/* zero_mmap */
+	NULL,		/* no special open code */
+	NULL,		/* no special release code */
+	NULL		/* fsync */
+};
+
+static int memory_open(struct inode * inode, struct file * filp)
 {
-	chrdev_fops[1] = &mem_fops;
-	kmem_start = tty_init(kmem_start);
-	kmem_start = lp_init(kmem_start);
-	return kmem_start;
+	switch (MINOR(inode->i_rdev)) {
+		case 0:
+			filp->f_op = &ram_fops;
+			break;
+		case 1:
+			filp->f_op = &mem_fops;
+			break;
+		case 2:
+			filp->f_op = &kmem_fops;
+			break;
+		case 3:
+			filp->f_op = &null_fops;
+			break;
+		case 4:
+			filp->f_op = &port_fops;
+			break;
+		case 5:
+			filp->f_op = &zero_fops;
+			break;
+		case 6:
+			filp->f_op = &core_fops;
+			break;
+		default:
+			return -ENODEV;
+	}
+	if (filp->f_op && filp->f_op->open)
+		return filp->f_op->open(inode,filp);
+	return 0;
+}
+
+static struct file_operations memory_fops = {
+	NULL,		/* lseek */
+	NULL,		/* read */
+	NULL,		/* write */
+	NULL,		/* readdir */
+	NULL,		/* select */
+	NULL,		/* ioctl */
+	NULL,		/* mmap */
+	memory_open,	/* just a selector for the real open */
+	NULL,		/* release */
+	NULL		/* fsync */
+};
+
+long chr_dev_init(long mem_start, long mem_end)
+{
+	if (register_chrdev(1,"mem",&memory_fops))
+		printk("unable to get major 1 for memory devs\n");
+	mem_start = tty_init(mem_start);
+	mem_start = lp_init(mem_start);
+	mem_start = mouse_init(mem_start);
+	mem_start = soundcard_init(mem_start);
+#if CONFIG_TAPE_QIC02
+	mem_start = tape_qic02_init(mem_start);
+#endif
+	return mem_start;
 }

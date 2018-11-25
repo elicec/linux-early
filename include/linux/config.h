@@ -1,7 +1,7 @@
-#ifndef _CONFIG_H
-#define _CONFIG_H
+#ifndef _LINUX_CONFIG_H
+#define _LINUX_CONFIG_H
 
-#define CONFIG_DISTRIBUTION
+#include <linux/autoconf.h>
 
 /*
  * Defines for what uname() should return 
@@ -12,21 +12,32 @@
 #ifndef UTS_NODENAME
 #define UTS_NODENAME "(none)"	/* set by sethostname() */
 #endif
-#include <linux/config_rel.h>
-#ifndef UTS_RELEASE
-#define UTS_RELEASE "0.95c-0" 
-#endif
-#include <linux/config_ver.h>
-#ifndef UTS_VERSION
-#define UTS_VERSION "mm/dd/yy"
-#endif
+
+#ifdef CONFIG_M486
+#define UTS_MACHINE "i486"	/* hardware type */
+#else
 #define UTS_MACHINE "i386"	/* hardware type */
+#endif
+
+#ifndef UTS_DOMAINNAME
+#define UTS_DOMAINNAME "(none)"	/* set by setdomainname() */
+#endif
+
+/*
+ * The definitions for UTS_RELEASE and UTS_VERSION are now defined
+ * in linux/version.h, and should only be used by linux/version.c
+ */
 
 /* Don't touch these, unless you really know what your doing. */
 #define DEF_INITSEG	0x9000
 #define DEF_SYSSEG	0x1000
 #define DEF_SETUPSEG	0x9020
-#define DEF_SYSSIZE	0x4000
+#define DEF_SYSSIZE	0x8000
+
+/* internal svga startup constants */
+#define NORMAL_VGA	0xffff		/* 80x25 mode */
+#define EXTENDED_VGA	0xfffe		/* 80x50 mode */
+#define ASK_VGA		0xfffd		/* ask for it at bootup */
 
 /*
  * The root-device is no longer hard-coded. You can change the default
@@ -65,40 +76,7 @@
 */
 
 #undef HD_TYPE
-
-#undef CONFIG_BLK_DEV_SD
-#undef CONFIG_BLK_DEV_ST
-
-/*
-	Choose supported SCSI adapters here.
-*/
-
-#undef CONFIG_SCSI_AHA1542
-#undef CONFIG_SCSI_ALWAYS
-#undef CONFIG_SCSI_CSC
-#undef CONFIG_SCSI_DTC
-#undef CONFIG_SCSI_FUTURE_DOMAIN
-#undef CONFIG_SCSI_SEAGATE
-#undef CONFIG_SCSI_ULTRASTOR
-
-#if defined(CONFIG_BLK_DEV_SD) || defined(CONFIG_BLK_DEV_ST)
-	#ifndef CONFIG_SCSI
-		#define CONFIG_SCSI
-	#endif
-	
-	#if !defined(CONFIG_SCSI_AHA1542) && !defined(CONFIG_SCSI_CSC) && !defined(CONFIG_SCSI_DTC) && \
-		!defined(CONFIG_SCSI_FUTURE_DOMAIN) &&  !defined(CONFIG_SCSI_SEAGATE) && !defined(CONFIG_SCSI_ULTRASTOR) 
-
-	#error  Error : SCSI devices enabled, but no low level drivers have been enabled.
-	#endif
-#endif
-
-#ifdef CONFIG_DISTRIBUTION
-	#include <linux/config.dist.h>
-#else
-	#include <linux/config.site.h>
-#endif
-
+ 
 /*
 	File type specific stuff goes into this.
 */

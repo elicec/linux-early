@@ -7,111 +7,69 @@
 #
 # Note 2! The CFLAGS definitions are now in the main makefile...
 
-AR	=ar
-AS	=as
-LD	=ld
-CC	=gcc -nostdinc -I../include
-CPP	=cpp -nostdinc -I../include
+SUBDIRS = minix ext ext2 msdos proc isofs nfs xiafs
+
+ifdef CONFIG_MINIX_FS
+FS_SUBDIRS := $(FS_SUBDIRS) minix
+endif
+ifdef CONFIG_EXT_FS
+FS_SUBDIRS := $(FS_SUBDIRS) ext
+endif
+ifdef CONFIG_EXT2_FS
+FS_SUBDIRS := $(FS_SUBDIRS) ext2
+endif
+ifdef CONFIG_MSDOS_FS
+FS_SUBDIRS := $(FS_SUBDIRS) msdos
+endif
+ifdef CONFIG_PROC_FS
+FS_SUBDIRS := $(FS_SUBDIRS) proc
+endif
+ifdef CONFIG_ISO9660_FS
+FS_SUBDIRS := $(FS_SUBDIRS) isofs
+endif
+ifdef CONFIG_NFS_FS
+FS_SUBDIRS := $(FS_SUBDIRS) nfs
+endif
+ifdef CONFIG_XIA_FS
+FS_SUBDIRS := $(FS_SUBDIRS) xiafs
+endif
+
 
 .c.s:
-	$(CC) $(CFLAGS) \
-	-S -o $*.s $<
+	$(CC) $(CFLAGS) -S $<
 .c.o:
-	$(CC) $(CFLAGS) \
-	-c -o $*.o $<
+	$(CC) $(CFLAGS) -c $<
 .s.o:
 	$(AS) -o $*.o $<
 
-OBJS=	open.o read_write.o inode.o file_table.o buffer.o super.o \
+OBJS=	open.o read_write.o inode.o devices.o file_table.o buffer.o super.o \
 	block_dev.o stat.o exec.o pipe.o namei.o fcntl.o ioctl.o \
-	select.o
+	select.o fifo.o locks.o filesystems.o
+
+all: fs.o filesystems.a
 
 fs.o: $(OBJS)
 	$(LD) -r -o fs.o $(OBJS)
 
+filesystems.a: dummy
+	rm -f filesystems.a
+	@for i in $(FS_SUBDIRS); do [ ! -d $$i ] || \
+	(cd $$i && echo $$i && $(MAKE) && $(AR) rcs ../filesystems.a $$i.o) \
+	|| exit; done
+
 clean:
-	rm -f core *.o *.a tmp_make
-	for i in *.c;do rm -f `basename $$i .c`.s;done
-	cd minix; make clean
+	rm -f core *.s *.o *.a
+	for i in $(SUBDIRS); do ([ -d $$i ] && cd $$i && $(MAKE) clean); done
 
-dep:
-	sed '/\#\#\# Dependencies/q' < Makefile > tmp_make
-	(for i in *.c;do $(CPP) -M $$i;done) >> tmp_make
-	cp tmp_make Makefile
-	cd minix; make dep
+depend dep:
+	$(CPP) -M *.c > .depend
+	for i in $(SUBDIRS); do [ ! -d $$i ] || (cd $$i && $(MAKE) dep) || exit; done
 
-### Dependencies:
-block_dev.o : block_dev.c ../include/errno.h ../include/linux/sched.h ../include/linux/head.h \
-  ../include/linux/fs.h ../include/sys/types.h ../include/sys/dirent.h ../include/limits.h \
-  ../include/sys/vfs.h ../include/linux/mm.h ../include/linux/kernel.h ../include/signal.h \
-  ../include/sys/param.h ../include/sys/time.h ../include/time.h ../include/sys/resource.h \
-  ../include/asm/segment.h ../include/asm/system.h 
-buffer.o : buffer.c ../include/stdarg.h ../include/linux/config.h ../include/linux/config_rel.h \
-  ../include/linux/config_ver.h ../include/linux/config.dist.h ../include/linux/sched.h \
-  ../include/linux/head.h ../include/linux/fs.h ../include/sys/types.h ../include/sys/dirent.h \
-  ../include/limits.h ../include/sys/vfs.h ../include/linux/mm.h ../include/linux/kernel.h \
-  ../include/signal.h ../include/sys/param.h ../include/sys/time.h ../include/time.h \
-  ../include/sys/resource.h ../include/asm/system.h ../include/asm/io.h 
-exec.o : exec.c ../include/signal.h ../include/sys/types.h ../include/errno.h \
-  ../include/linux/string.h ../include/linux/stat.h ../include/sys/ptrace.h ../include/a.out.h \
-  ../include/fcntl.h ../include/linux/fs.h ../include/sys/dirent.h ../include/limits.h \
-  ../include/sys/vfs.h ../include/linux/sched.h ../include/linux/head.h ../include/linux/mm.h \
-  ../include/linux/kernel.h ../include/sys/param.h ../include/sys/time.h ../include/time.h \
-  ../include/sys/resource.h ../include/asm/segment.h ../include/sys/user.h 
-fcntl.o : fcntl.c ../include/errno.h ../include/fcntl.h ../include/sys/types.h \
-  ../include/linux/stat.h ../include/asm/segment.h ../include/linux/string.h ../include/linux/sched.h \
-  ../include/linux/head.h ../include/linux/fs.h ../include/sys/dirent.h ../include/limits.h \
-  ../include/sys/vfs.h ../include/linux/mm.h ../include/linux/kernel.h ../include/signal.h \
-  ../include/sys/param.h ../include/sys/time.h ../include/time.h ../include/sys/resource.h 
-file_table.o : file_table.c ../include/linux/fs.h ../include/sys/types.h ../include/sys/dirent.h \
-  ../include/limits.h ../include/sys/vfs.h 
-inode.o : inode.c ../include/linux/string.h ../include/linux/stat.h ../include/linux/sched.h \
-  ../include/linux/head.h ../include/linux/fs.h ../include/sys/types.h ../include/sys/dirent.h \
-  ../include/limits.h ../include/sys/vfs.h ../include/linux/mm.h ../include/linux/kernel.h \
-  ../include/signal.h ../include/sys/param.h ../include/sys/time.h ../include/time.h \
-  ../include/sys/resource.h ../include/asm/system.h 
-ioctl.o : ioctl.c ../include/linux/string.h ../include/errno.h ../include/linux/stat.h \
-  ../include/linux/sched.h ../include/linux/head.h ../include/linux/fs.h ../include/sys/types.h \
-  ../include/sys/dirent.h ../include/limits.h ../include/sys/vfs.h ../include/linux/mm.h \
-  ../include/linux/kernel.h ../include/signal.h ../include/sys/param.h ../include/sys/time.h \
-  ../include/time.h ../include/sys/resource.h 
-namei.o : namei.c ../include/linux/sched.h ../include/linux/head.h ../include/linux/fs.h \
-  ../include/sys/types.h ../include/sys/dirent.h ../include/limits.h ../include/sys/vfs.h \
-  ../include/linux/mm.h ../include/linux/kernel.h ../include/signal.h ../include/sys/param.h \
-  ../include/sys/time.h ../include/time.h ../include/sys/resource.h ../include/asm/segment.h \
-  ../include/linux/string.h ../include/fcntl.h ../include/errno.h ../include/const.h \
-  ../include/linux/stat.h 
-open.o : open.c ../include/errno.h ../include/fcntl.h ../include/sys/types.h \
-  ../include/utime.h ../include/sys/vfs.h ../include/linux/stat.h ../include/linux/string.h \
-  ../include/linux/sched.h ../include/linux/head.h ../include/linux/fs.h ../include/sys/dirent.h \
-  ../include/limits.h ../include/linux/mm.h ../include/linux/kernel.h ../include/signal.h \
-  ../include/sys/param.h ../include/sys/time.h ../include/time.h ../include/sys/resource.h \
-  ../include/asm/segment.h 
-pipe.o : pipe.c ../include/signal.h ../include/sys/types.h ../include/errno.h \
-  ../include/termios.h ../include/fcntl.h ../include/asm/segment.h ../include/linux/sched.h \
-  ../include/linux/head.h ../include/linux/fs.h ../include/sys/dirent.h ../include/limits.h \
-  ../include/sys/vfs.h ../include/linux/mm.h ../include/linux/kernel.h ../include/sys/param.h \
-  ../include/sys/time.h ../include/time.h ../include/sys/resource.h 
-read_write.o : read_write.c ../include/errno.h ../include/sys/types.h ../include/sys/dirent.h \
-  ../include/limits.h ../include/linux/stat.h ../include/linux/kernel.h ../include/linux/sched.h \
-  ../include/linux/head.h ../include/linux/fs.h ../include/sys/vfs.h ../include/linux/mm.h \
-  ../include/signal.h ../include/sys/param.h ../include/sys/time.h ../include/time.h \
-  ../include/sys/resource.h ../include/linux/minix_fs.h ../include/asm/segment.h 
-select.o : select.c ../include/linux/fs.h ../include/sys/types.h ../include/sys/dirent.h \
-  ../include/limits.h ../include/sys/vfs.h ../include/linux/kernel.h ../include/linux/tty.h \
-  ../include/asm/system.h ../include/termios.h ../include/linux/sched.h ../include/linux/head.h \
-  ../include/linux/mm.h ../include/signal.h ../include/sys/param.h ../include/sys/time.h \
-  ../include/time.h ../include/sys/resource.h ../include/linux/string.h ../include/linux/stat.h \
-  ../include/asm/segment.h ../include/const.h ../include/errno.h 
-stat.o : stat.c ../include/errno.h ../include/linux/stat.h ../include/linux/fs.h \
-  ../include/sys/types.h ../include/sys/dirent.h ../include/limits.h ../include/sys/vfs.h \
-  ../include/linux/sched.h ../include/linux/head.h ../include/linux/mm.h ../include/linux/kernel.h \
-  ../include/signal.h ../include/sys/param.h ../include/sys/time.h ../include/time.h \
-  ../include/sys/resource.h ../include/asm/segment.h 
-super.o : super.c ../include/linux/config.h ../include/linux/config_rel.h ../include/linux/config_ver.h \
-  ../include/linux/config.dist.h ../include/linux/sched.h ../include/linux/head.h \
-  ../include/linux/fs.h ../include/sys/types.h ../include/sys/dirent.h ../include/limits.h \
-  ../include/sys/vfs.h ../include/linux/mm.h ../include/linux/kernel.h ../include/signal.h \
-  ../include/sys/param.h ../include/sys/time.h ../include/time.h ../include/sys/resource.h \
-  ../include/linux/minix_fs.h ../include/linux/stat.h ../include/asm/system.h \
-  ../include/asm/segment.h ../include/errno.h 
+dummy:
+
+#
+# include a dependency file if one exists
+#
+ifeq (.depend,$(wildcard .depend))
+include .depend
+endif

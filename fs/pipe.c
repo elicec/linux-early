@@ -1,18 +1,17 @@
 /*
  *  linux/fs/pipe.c
  *
- *  (C) 1991  Linus Torvalds
+ *  Copyright (C) 1991, 1992  Linus Torvalds
  */
-
-#include <signal.h>
-#include <errno.h>
-#include <termios.h>
-#include <fcntl.h>
 
 #include <asm/segment.h>
 
 #include <linux/sched.h>
 #include <linux/kernel.h>
+#include <linux/errno.h>
+#include <linux/signal.h>
+#include <linux/fcntl.h>
+#include <linux/termios.h>
 
 static int pipe_read(struct inode * inode, struct file * filp, char * buf, int count)
 {
@@ -21,7 +20,7 @@ static int pipe_read(struct inode * inode, struct file * filp, char * buf, int c
 	if (!(filp->f_flags & O_NONBLOCK))
 		while (!PIPE_SIZE(*inode)) {
 			wake_up(& PIPE_WRITE_WAIT(*inode));
-			if (inode->i_count != 2) /* are there any writers? */
+			if (!PIPE_WRITERS(*inode)) /* are there any writers? */
 				return 0;
 			if (current->signal & ~current->blocked)
 				return -ERESTARTSYS;
@@ -33,51 +32,63 @@ static int pipe_read(struct inode * inode, struct file * filp, char * buf, int c
 			chars = count;
 		if (chars > size)
 			chars = size;
-		count -= chars;
+		memcpy_tofs(buf, PIPE_BASE(*inode)+PIPE_TAIL(*inode), chars );
 		read += chars;
-		size = PIPE_TAIL(*inode);
 		PIPE_TAIL(*inode) += chars;
 		PIPE_TAIL(*inode) &= (PAGE_SIZE-1);
-		while (chars-->0)
-			put_fs_byte(((char *)inode->i_size)[size++],buf++);
+		count -= chars;
+		buf += chars;
 	}
 	wake_up(& PIPE_WRITE_WAIT(*inode));
-	return read?read:-EAGAIN;
+	if (read)
+		return read;
+	if (PIPE_WRITERS(*inode))
+		return -EAGAIN;
+	return 0;
 }
 	
 static int pipe_write(struct inode * inode, struct file * filp, char * buf, int count)
 {
 	int chars, size, written = 0;
 
-	if (inode->i_count != 2) { /* no readers */
+	if (!PIPE_READERS(*inode)) { /* no readers */
 		send_sig(SIGPIPE,current,0);
-		return -EINTR;
+		return -EPIPE;
 	}
+/* if count < PAGE_SIZE, we have to make it atomic */
+	if (count < PAGE_SIZE)
+		size = PAGE_SIZE-count;
+	else
+		size = PAGE_SIZE-1;
 	while (count>0) {
-		while (!(size=(PAGE_SIZE-1)-PIPE_SIZE(*inode))) {
-			wake_up(& PIPE_READ_WAIT(*inode));
-			if (inode->i_count != 2) { /* no readers */
+		while (PIPE_SIZE(*inode) >= size) {
+			if (!PIPE_READERS(*inode)) { /* no readers */
 				send_sig(SIGPIPE,current,0);
-				return written?written:-EINTR;
+				return written?written:-EPIPE;
 			}
 			if (current->signal & ~current->blocked)
-				return written?written:-EINTR;
-			interruptible_sleep_on(&PIPE_WRITE_WAIT(*inode));
+				return written?written:-ERESTARTSYS;
+			if (filp->f_flags & O_NONBLOCK)
+				return written?written:-EAGAIN;
+			else
+				interruptible_sleep_on(&PIPE_WRITE_WAIT(*inode));
 		}
-		chars = PAGE_SIZE-PIPE_HEAD(*inode);
-		if (chars > count)
-			chars = count;
-		if (chars > size)
-			chars = size;
-		count -= chars;
-		written += chars;
-		size = PIPE_HEAD(*inode);
-		PIPE_HEAD(*inode) += chars;
-		PIPE_HEAD(*inode) &= (PAGE_SIZE-1);
-		while (chars-->0)
-			((char *)inode->i_size)[size++]=get_fs_byte(buf++);
+		while (count>0 && (size = (PAGE_SIZE-1)-PIPE_SIZE(*inode))) {
+			chars = PAGE_SIZE-PIPE_HEAD(*inode);
+			if (chars > count)
+				chars = count;
+			if (chars > size)
+				chars = size;
+			memcpy_fromfs(PIPE_BASE(*inode)+PIPE_HEAD(*inode), buf, chars );
+			written += chars;
+			PIPE_HEAD(*inode) += chars;
+			PIPE_HEAD(*inode) &= (PAGE_SIZE-1);
+			count -= chars;
+			buf += chars;
+		}
+		wake_up(& PIPE_READ_WAIT(*inode));
+		size = PAGE_SIZE-1;
 	}
-	wake_up(& PIPE_READ_WAIT(*inode));
 	return written;
 }
 
@@ -97,68 +108,203 @@ static int bad_pipe_rw(struct inode * inode, struct file * filp, char * buf, int
 }
 
 static int pipe_ioctl(struct inode *pino, struct file * filp,
-	unsigned int cmd, unsigned int arg)
+	unsigned int cmd, unsigned long arg)
 {
+	int error;
+
 	switch (cmd) {
 		case FIONREAD:
-			verify_area((void *) arg,4);
-			put_fs_long(PIPE_SIZE(*pino),(unsigned long *) arg);
-			return 0;
+			error = verify_area(VERIFY_WRITE, (void *) arg,4);
+			if (!error)
+				put_fs_long(PIPE_SIZE(*pino),(unsigned long *) arg);
+			return error;
 		default:
 			return -EINVAL;
 	}
 }
 
+static int pipe_select(struct inode * inode, struct file * filp, int sel_type, select_table * wait)
+{
+	switch (sel_type) {
+		case SEL_IN:
+			if (!PIPE_EMPTY(*inode) || !PIPE_WRITERS(*inode))
+				return 1;
+			select_wait(&PIPE_READ_WAIT(*inode), wait);
+			return 0;
+		case SEL_OUT:
+			if (!PIPE_FULL(*inode) || !PIPE_READERS(*inode))
+				return 1;
+			select_wait(&PIPE_WRITE_WAIT(*inode), wait);
+			return 0;
+		case SEL_EX:
+			if (!PIPE_READERS(*inode) || !PIPE_WRITERS(*inode))
+				return 1;
+			select_wait(&inode->i_wait,wait);
+			return 0;
+	}
+	return 0;
+}
+
 /*
- * Ok, these two routines should keep track of readers/writers,
- * but it's currently done with the inode->i_count checking.
+ * The 'connect_xxx()' functions are needed for named pipes when
+ * the open() code hasn't guaranteed a connection (O_NONBLOCK),
+ * and we need to act differently until we do get a writer..
+ */
+static int connect_read(struct inode * inode, struct file * filp, char * buf, int count)
+{
+	while (!PIPE_SIZE(*inode)) {
+		if (PIPE_WRITERS(*inode))
+			break;
+		if (filp->f_flags & O_NONBLOCK)
+			return -EAGAIN;
+		wake_up(& PIPE_WRITE_WAIT(*inode));
+		if (current->signal & ~current->blocked)
+			return -ERESTARTSYS;
+		interruptible_sleep_on(& PIPE_READ_WAIT(*inode));
+	}
+	filp->f_op = &read_pipe_fops;
+	return pipe_read(inode,filp,buf,count);
+}
+
+static int connect_select(struct inode * inode, struct file * filp, int sel_type, select_table * wait)
+{
+	switch (sel_type) {
+		case SEL_IN:
+			if (!PIPE_EMPTY(*inode)) {
+				filp->f_op = &read_pipe_fops;
+				return 1;
+			}
+			select_wait(&PIPE_READ_WAIT(*inode), wait);
+			return 0;
+		case SEL_OUT:
+			if (!PIPE_FULL(*inode))
+				return 1;
+			select_wait(&PIPE_WRITE_WAIT(*inode), wait);
+			return 0;
+		case SEL_EX:
+			if (!PIPE_READERS(*inode) || !PIPE_WRITERS(*inode))
+				return 1;
+			select_wait(&inode->i_wait,wait);
+			return 0;
+	}
+	return 0;
+}
+
+/*
+ * Ok, these three routines NOW keep track of readers/writers,
+ * Linus previously did it with inode->i_count checking.
  */
 static void pipe_read_release(struct inode * inode, struct file * filp)
 {
+	PIPE_READERS(*inode)--;
+	wake_up(&PIPE_WRITE_WAIT(*inode));
 }
 
 static void pipe_write_release(struct inode * inode, struct file * filp)
 {
+	PIPE_WRITERS(*inode)--;
+	wake_up(&PIPE_READ_WAIT(*inode));
 }
 
-static struct file_operations read_pipe_fops = {
+static void pipe_rdwr_release(struct inode * inode, struct file * filp)
+{
+	PIPE_READERS(*inode)--;
+	PIPE_WRITERS(*inode)--;
+	wake_up(&PIPE_READ_WAIT(*inode));
+	wake_up(&PIPE_WRITE_WAIT(*inode));
+}
+
+/*
+ * The file_operations structs are not static because they
+ * are also used in linux/fs/fifo.c to do operations on fifo's.
+ */
+struct file_operations connecting_pipe_fops = {
+	pipe_lseek,
+	connect_read,
+	bad_pipe_rw,
+	pipe_readdir,
+	connect_select,
+	pipe_ioctl,
+	NULL,		/* no mmap on pipes.. surprise */
+	NULL,		/* no special open code */
+	pipe_read_release,
+	NULL
+};
+
+struct file_operations read_pipe_fops = {
 	pipe_lseek,
 	pipe_read,
 	bad_pipe_rw,
 	pipe_readdir,
-	NULL,		/* pipe_select */
+	pipe_select,
 	pipe_ioctl,
+	NULL,		/* no mmap on pipes.. surprise */
 	NULL,		/* no special open code */
-	pipe_read_release
+	pipe_read_release,
+	NULL
 };
 
-static struct file_operations write_pipe_fops = {
+struct file_operations write_pipe_fops = {
 	pipe_lseek,
 	bad_pipe_rw,
 	pipe_write,
 	pipe_readdir,
-	NULL,		/* pipe_select */
+	pipe_select,
 	pipe_ioctl,
+	NULL,		/* mmap */
 	NULL,		/* no special open code */
-	pipe_write_release
+	pipe_write_release,
+	NULL
 };
 
-int sys_pipe(unsigned long * fildes)
+struct file_operations rdwr_pipe_fops = {
+	pipe_lseek,
+	pipe_read,
+	pipe_write,
+	pipe_readdir,
+	pipe_select,
+	pipe_ioctl,
+	NULL,		/* mmap */
+	NULL,		/* no special open code */
+	pipe_rdwr_release,
+	NULL
+};
+
+struct inode_operations pipe_inode_operations = {
+	&rdwr_pipe_fops,
+	NULL,			/* create */
+	NULL,			/* lookup */
+	NULL,			/* link */
+	NULL,			/* unlink */
+	NULL,			/* symlink */
+	NULL,			/* mkdir */
+	NULL,			/* rmdir */
+	NULL,			/* mknod */
+	NULL,			/* rename */
+	NULL,			/* readlink */
+	NULL,			/* follow_link */
+	NULL,			/* bmap */
+	NULL,			/* truncate */
+	NULL			/* permission */
+};
+
+extern "C" int sys_pipe(unsigned long * fildes)
 {
 	struct inode * inode;
 	struct file * f[2];
 	int fd[2];
 	int i,j;
 
-	verify_area(fildes,8);
-	j=0;
-	for(i=0;j<2 && i<NR_FILE;i++)
-		if (!file_table[i].f_count)
-			(f[j++]=i+file_table)->f_count++;
+	j = verify_area(VERIFY_WRITE,fildes,8);
+	if (j)
+		return j;
+	for(j=0 ; j<2 ; j++)
+		if (!(f[j] = get_empty_filp()))
+			break;
 	if (j==1)
-		f[0]->f_count=0;
+		f[0]->f_count--;
 	if (j<2)
-		return -1;
+		return -ENFILE;
 	j=0;
 	for(i=0;j<2 && i<NR_OPEN;i++)
 		if (!current->filp[i]) {
@@ -168,20 +314,23 @@ int sys_pipe(unsigned long * fildes)
 	if (j==1)
 		current->filp[fd[0]]=NULL;
 	if (j<2) {
-		f[0]->f_count=f[1]->f_count=0;
-		return -1;
+		f[0]->f_count--;
+		f[1]->f_count--;
+		return -EMFILE;
 	}
 	if (!(inode=get_pipe_inode())) {
-		current->filp[fd[0]] =
-			current->filp[fd[1]] = NULL;
-		f[0]->f_count = f[1]->f_count = 0;
-		return -1;
+		current->filp[fd[0]] = NULL;
+		current->filp[fd[1]] = NULL;
+		f[0]->f_count--;
+		f[1]->f_count--;
+		return -ENFILE;
 	}
 	f[0]->f_inode = f[1]->f_inode = inode;
 	f[0]->f_pos = f[1]->f_pos = 0;
-	f[0]->f_flags = f[1]->f_flags = 0;
+	f[0]->f_flags = O_RDONLY;
 	f[0]->f_op = &read_pipe_fops;
 	f[0]->f_mode = 1;		/* read */
+	f[1]->f_flags = O_WRONLY;
 	f[1]->f_op = &write_pipe_fops;
 	f[1]->f_mode = 2;		/* write */
 	put_fs_long(fd[0],0+fildes);

@@ -1,16 +1,11 @@
-#ifndef _STRING_H_
-#define _STRING_H_
+#ifndef _LINUX_STRING_H_
+#define _LINUX_STRING_H_
+
+#include <linux/types.h>	/* for size_t */
 
 #ifndef NULL
 #define NULL ((void *) 0)
 #endif
-
-#ifndef _SIZE_T
-#define _SIZE_T
-typedef unsigned int size_t;
-#endif
-
-extern char * strerror(int errno);
 
 /*
  * This string-include defines all string functions as inline
@@ -21,7 +16,7 @@ extern char * strerror(int errno);
  * set, making the functions fast and clean. String instructions have been
  * used through-out, making for "slightly" unclear code :-)
  *
- *		(C) 1991 Linus Torvalds
+ *		Copyright (C) 1991, 1992 Linus Torvalds
  */
  
 extern inline char * strcpy(char * dest,const char *src)
@@ -31,7 +26,8 @@ __asm__("cld\n"
 	"stosb\n\t"
 	"testb %%al,%%al\n\t"
 	"jne 1b"
-	::"S" (src),"D" (dest):"si","di","ax");
+	: /* no output */
+	:"S" (src),"D" (dest):"si","di","ax","memory");
 return dest;
 }
 
@@ -47,7 +43,8 @@ __asm__("cld\n"
 	"rep\n\t"
 	"stosb\n"
 	"2:"
-	::"S" (src),"D" (dest),"c" (count):"si","di","ax","cx");
+	: /* no output */
+	:"S" (src),"D" (dest),"c" (count):"si","di","ax","cx","memory");
 return dest;
 }
 
@@ -61,7 +58,8 @@ __asm__("cld\n\t"
 	"stosb\n\t"
 	"testb %%al,%%al\n\t"
 	"jne 1b"
-	::"S" (src),"D" (dest),"a" (0),"c" (0xffffffff):"si","di","ax","cx");
+	: /* no output */
+	:"S" (src),"D" (dest),"a" (0),"c" (0xffffffff):"si","di","ax","cx");
 return dest;
 }
 
@@ -80,8 +78,9 @@ __asm__("cld\n\t"
 	"jne 1b\n"
 	"2:\txorl %2,%2\n\t"
 	"stosb"
-	::"S" (src),"D" (dest),"a" (0),"c" (0xffffffff),"g" (count)
-	:"si","di","ax","cx");
+	: /* no output */
+	:"S" (src),"D" (dest),"a" (0),"c" (0xffffffff),"g" (count)
+	:"si","di","ax","cx","memory");
 return dest;
 }
 
@@ -97,7 +96,7 @@ __asm__("cld\n"
 	"xorl %%eax,%%eax\n\t"
 	"jmp 3f\n"
 	"2:\tmovl $1,%%eax\n\t"
-	"jl 3f\n\t"
+	"jb 3f\n\t"
 	"negl %%eax\n"
 	"3:"
 	:"=a" (__res):"D" (cs),"S" (ct):"si","di");
@@ -118,7 +117,7 @@ __asm__("cld\n"
 	"2:\txorl %%eax,%%eax\n\t"
 	"jmp 4f\n"
 	"3:\tmovl $1,%%eax\n\t"
-	"jl 4f\n\t"
+	"jb 4f\n\t"
 	"negl %%eax\n"
 	"4:"
 	:"=a" (__res):"D" (cs),"S" (ct),"c" (count):"si","di","cx");
@@ -276,7 +275,7 @@ extern char * ___strtok;
 
 extern inline char * strtok(char * s,const char * ct)
 {
-register char * __res __asm__("si");
+register char * __res;
 __asm__("testl %1,%1\n\t"
 	"jne 1f\n\t"
 	"testl %0,%0\n\t"
@@ -327,25 +326,29 @@ __asm__("testl %1,%1\n\t"
 	"jne 8f\n\t"
 	"movl %0,%1\n"
 	"8:"
-#if __GNUC__ == 2
-	:"=r" (__res)
-#else
-	:"=b" (__res)
-#endif
-	,"=S" (___strtok)
+	:"=b" (__res),"=S" (___strtok)
 	:"0" (___strtok),"1" (s),"g" (ct)
-	:"ax","cx","dx","di");
+	:"ax","cx","dx","di","memory");
 return __res;
 }
 
-extern inline void * memcpy(void * dest,const void * src, size_t n)
+extern inline void * memcpy(void * to, const void * from, size_t n)
 {
 __asm__("cld\n\t"
-	"rep\n\t"
-	"movsb"
-	::"c" (n),"S" (src),"D" (dest)
-	:"cx","si","di");
-return dest;
+	"movl %%edx, %%ecx\n\t"
+	"shrl $2,%%ecx\n\t"
+	"rep ; movsl\n\t"
+	"testb $1,%%dl\n\t"
+	"je 1f\n\t"
+	"movsb\n"
+	"1:\ttestb $2,%%dl\n\t"
+	"je 2f\n\t"
+	"movsw\n"
+	"2:\n"
+	: /* no output */
+	:"d" (n),"D" ((long) to),"S" ((long) from)
+	: "cx","di","si","memory");
+return (to);
 }
 
 extern inline void * memmove(void * dest,const void * src, size_t n)
@@ -354,15 +357,17 @@ if (dest<src)
 __asm__("cld\n\t"
 	"rep\n\t"
 	"movsb"
-	::"c" (n),"S" (src),"D" (dest)
+	: /* no output */
+	:"c" (n),"S" (src),"D" (dest)
 	:"cx","si","di");
 else
 __asm__("std\n\t"
 	"rep\n\t"
 	"movsb\n\t"
 	"cld"
-	::"c" (n),"S" (src+n-1),"D" (dest+n-1)
-	:"cx","si","di");
+	: /* no output */
+	:"c" (n),"S" (src+n-1),"D" (dest+n-1)
+	:"cx","si","di","memory");
 return dest;
 }
 
@@ -374,7 +379,7 @@ __asm__("cld\n\t"
 	"cmpsb\n\t"
 	"je 1f\n\t"
 	"movl $1,%%eax\n\t"
-	"jl 1f\n\t"
+	"jb 1f\n\t"
 	"negl %%eax\n"
 	"1:"
 	:"=a" (__res):"0" (0),"D" (cs),"S" (ct),"c" (count)
@@ -403,8 +408,9 @@ extern inline void * memset(void * s,char c,size_t count)
 __asm__("cld\n\t"
 	"rep\n\t"
 	"stosb"
-	::"a" (c),"D" (s),"c" (count)
-	:"cx","di");
+	: /* no output */
+	:"a" (c),"D" (s),"c" (count)
+	:"cx","di","memory");
 return s;
 }
 

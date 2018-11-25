@@ -7,46 +7,46 @@
 #
 # Note 2! The CFLAGS definition is now in the main makefile...
 
-AS	=as
-AR	=ar
-LD	=ld
-CC	=gcc -nostdinc -I../include -Wall # -DSOCK_DEBUG
-CPP	=cpp -nostdinc -I../include
+# only these two lines should need to be changed to remove inet sockets.
+# (and the inet/tcpip.o in net.o)
+
+DRIVERS     = drv
+SUBDIRS     := unix inet
 
 .c.o:
-	$(CC) $(CFLAGS) \
-	-c -o $*.o $<
+	$(CC) $(CFLAGS) -c $<
 .s.o:
 	$(AS) -o $*.o $<
 .c.s:
-	$(CC) $(CFLAGS) \
-	-S -o $*.s $<
+	$(CC) $(CFLAGS) -S $<
 
-OBJS	=  socket.o unix.o
+OBJS	=  Space.o ddi.o socket.o
 
-net.o: $(OBJS)
-	$(LD) -r -o net.o $(OBJS)
+all:		net.o
+
+net.o:		$(OBJS) subdirs
+		$(LD) -r -o net.o $(OBJS) $(DRIVERS)/$(DRIVERS).a network.a
+
+subdirs:	dummy
+		@rm -f network.a
+		@for i in $(DRIVERS); do (cd $$i && echo $$i && $(MAKE) $$i.a) || exit; done
+		@for i in $(SUBDIRS); do (cd $$i && echo $$i && $(MAKE) && ar rcs ../network.a $$i.o) || exit; done
+		@ranlib network.a
 
 clean:
-	rm -f core *.o *.a tmp_make
-	for i in *.c;do rm -f `basename $$i .c`.s;done
+		rm -f core *.o *.a *.s .depend
+		@for i in $(DRIVERS) $(SUBDIRS); do (cd $$i && echo $$i && $(MAKE) clean) || exit; done
 
 dep:
-	sed '/\#\#\# Dependencies/q' < Makefile > tmp_make
-	(for i in *.c;do $(CPP) -M $$i;done) >> tmp_make
-	cp tmp_make Makefile
+		$(CPP) -M *.c > .depend
+		@for i in $(DRIVERS) $(SUBDIRS); do (cd $$i && echo $$i && $(MAKE) dep) || exit; done
 
-### Dependencies:
-socket.o : socket.c ../include/signal.h ../include/sys/types.h ../include/errno.h \
-  ../include/linux/sched.h ../include/linux/head.h ../include/linux/fs.h ../include/sys/dirent.h \
-  ../include/limits.h ../include/sys/vfs.h ../include/linux/mm.h ../include/linux/kernel.h \
-  ../include/sys/param.h ../include/sys/time.h ../include/time.h ../include/sys/resource.h \
-  ../include/linux/stat.h ../include/asm/system.h ../include/asm/segment.h ../include/sys/socket.h \
-  ../include/fcntl.h ../include/termios.h kern_sock.h socketcall.h 
-unix.o : unix.c ../include/signal.h ../include/sys/types.h ../include/errno.h \
-  ../include/linux/string.h ../include/linux/sched.h ../include/linux/head.h ../include/linux/fs.h \
-  ../include/sys/dirent.h ../include/limits.h ../include/sys/vfs.h ../include/linux/mm.h \
-  ../include/linux/kernel.h ../include/sys/param.h ../include/sys/time.h ../include/time.h \
-  ../include/sys/resource.h ../include/linux/stat.h ../include/asm/system.h ../include/asm/segment.h \
-  ../include/sys/socket.h ../include/sys/un.h ../include/fcntl.h ../include/termios.h \
-  kern_sock.h 
+dummy:
+
+#
+# include a dependency file if one exists
+#
+ifeq (.depend,$(wildcard .depend))
+include .depend
+endif
+
