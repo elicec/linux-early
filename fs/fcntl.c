@@ -19,25 +19,25 @@ extern int sock_fcntl (struct file *, unsigned int cmd, unsigned long arg);
 
 static int dupfd(unsigned int fd, unsigned int arg)
 {
-	if (fd >= NR_OPEN || !current->filp[fd])
+	if (fd >= NR_OPEN || !current->files->fd[fd])
 		return -EBADF;
 	if (arg >= NR_OPEN)
 		return -EINVAL;
 	while (arg < NR_OPEN)
-		if (current->filp[arg])
+		if (current->files->fd[arg])
 			arg++;
 		else
 			break;
 	if (arg >= NR_OPEN)
 		return -EMFILE;
-	FD_CLR(arg, &current->close_on_exec);
-	(current->filp[arg] = current->filp[fd])->f_count++;
+	FD_CLR(arg, &current->files->close_on_exec);
+	(current->files->fd[arg] = current->files->fd[fd])->f_count++;
 	return arg;
 }
 
 asmlinkage int sys_dup2(unsigned int oldfd, unsigned int newfd)
 {
-	if (oldfd >= NR_OPEN || !current->filp[oldfd])
+	if (oldfd >= NR_OPEN || !current->files->fd[oldfd])
 		return -EBADF;
 	if (newfd == oldfd)
 		return newfd;
@@ -67,24 +67,31 @@ asmlinkage int sys_fcntl(unsigned int fd, unsigned int cmd, unsigned long arg)
 {	
 	struct file * filp;
 
-	if (fd >= NR_OPEN || !(filp = current->filp[fd]))
+	if (fd >= NR_OPEN || !(filp = current->files->fd[fd]))
 		return -EBADF;
 	switch (cmd) {
 		case F_DUPFD:
 			return dupfd(fd,arg);
 		case F_GETFD:
-			return FD_ISSET(fd, &current->close_on_exec);
+			return FD_ISSET(fd, &current->files->close_on_exec);
 		case F_SETFD:
 			if (arg&1)
-				FD_SET(fd, &current->close_on_exec);
+				FD_SET(fd, &current->files->close_on_exec);
 			else
-				FD_CLR(fd, &current->close_on_exec);
+				FD_CLR(fd, &current->files->close_on_exec);
 			return 0;
 		case F_GETFL:
 			return filp->f_flags;
 		case F_SETFL:
-			filp->f_flags &= ~(O_APPEND | O_NONBLOCK);
-			filp->f_flags |= arg & (O_APPEND | O_NONBLOCK);
+			if ((arg & FASYNC) && !(filp->f_flags & FASYNC) &&
+			    filp->f_op->fasync)
+				filp->f_op->fasync(filp->f_inode, filp, 1);
+			if (!(arg & FASYNC) && (filp->f_flags & FASYNC) &&
+			    filp->f_op->fasync)
+				filp->f_op->fasync(filp->f_inode, filp, 0);
+			filp->f_flags &= ~(O_APPEND | O_NONBLOCK | FASYNC);
+			filp->f_flags |= arg & (O_APPEND | O_NONBLOCK |
+						FASYNC);
 			return 0;
 		case F_GETLK:
 			return fcntl_getlk(fd, (struct flock *) arg);
@@ -92,6 +99,20 @@ asmlinkage int sys_fcntl(unsigned int fd, unsigned int cmd, unsigned long arg)
 			return fcntl_setlk(fd, cmd, (struct flock *) arg);
 		case F_SETLKW:
 			return fcntl_setlk(fd, cmd, (struct flock *) arg);
+		case F_GETOWN:
+			/*
+			 * XXX If f_owner is a process group, the
+			 * negative return value will get converted
+			 * into an error.  Oops.  If we keep the the
+			 * current syscall conventions, the only way
+			 * to fix this will be in libc.
+			 */
+			return filp->f_owner;
+		case F_SETOWN:
+			filp->f_owner = arg; /* XXX security implications? */
+			if (S_ISSOCK (filp->f_inode->i_mode))
+				sock_fcntl (filp, F_SETOWN, arg);
+			return 0;
 		default:
 			/* sockets need a few special fcntls. */
 			if (S_ISSOCK (filp->f_inode->i_mode))
@@ -99,5 +120,21 @@ asmlinkage int sys_fcntl(unsigned int fd, unsigned int cmd, unsigned long arg)
 			     return (sock_fcntl (filp, cmd, arg));
 			  }
 			return -EINVAL;
+	}
+}
+
+void kill_fasync(struct fasync_struct *fa, int sig)
+{
+	while (fa) {
+		if (fa->magic != FASYNC_MAGIC) {
+			printk("kill_fasync: bad magic number in "
+			       "fasync_struct!\n");
+			return;
+		}
+		if (fa->fa_file->f_owner > 0)
+			kill_proc(fa->fa_file->f_owner, sig, 1);
+		else
+			kill_pg(-fa->fa_file->f_owner, sig, 1);
+		fa = fa->fa_next;
 	}
 }

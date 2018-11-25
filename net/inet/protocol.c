@@ -29,12 +29,12 @@
 #include <linux/string.h>
 #include <linux/socket.h>
 #include <linux/in.h>
-#include "inet.h"
-#include "dev.h"
+#include <linux/inet.h>
+#include <linux/netdevice.h>
 #include "ip.h"
 #include "protocol.h"
 #include "tcp.h"
-#include "skbuff.h"
+#include <linux/skbuff.h>
 #include "sock.h"
 #include "icmp.h"
 #include "udp.h"
@@ -88,10 +88,8 @@ inet_get_protocol(unsigned char prot)
   unsigned char hash;
   struct inet_protocol *p;
 
-  DPRINTF((DBG_PROTO, "get_protocol (%d)\n ", prot));
   hash = prot & (MAX_INET_PROTOS - 1);
   for (p = inet_protos[hash] ; p != NULL; p=p->next) {
-	DPRINTF((DBG_PROTO, "trying protocol %d\n", p->protocol));
 	if (p->protocol == prot) return((struct inet_protocol *) p);
   }
   return(NULL);

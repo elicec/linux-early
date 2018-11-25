@@ -101,7 +101,10 @@ asmlinkage void alignment_check(void);
 	printk("ds: %04x   es: %04x   fs: %04x   gs: %04x   ss: %04x\n",
 		regs->ds, regs->es, regs->fs, regs->gs, ss);
 	store_TR(i);
-	printk("Pid: %d, process nr: %d (%s)\nStack: ", current->pid, 0xffff & i, current->comm);
+	if (STACK_MAGIC != *(unsigned long *)current->kernel_stack_page)
+		printk("Corrupted stack page\n");
+	printk("Process %s (pid: %d, process nr: %d, stackpage=%08lx)\nStack: ",
+		current->comm, current->pid, 0xffff & i, current->kernel_stack_page);
 	for(i=0;i<5;i++)
 		printk("%08lx ", get_seg_long(ss,(i+(unsigned long *)esp)));
 	printk("\nCode: ");
@@ -122,9 +125,20 @@ DO_ERROR( 9, SIGFPE,  "coprocessor segment overrun", coprocessor_segment_overrun
 DO_ERROR(10, SIGSEGV, "invalid TSS", invalid_TSS, current)
 DO_ERROR(11, SIGSEGV, "segment not present", segment_not_present, current)
 DO_ERROR(12, SIGSEGV, "stack segment", stack_segment, current)
-DO_ERROR(13, SIGSEGV, "general protection", general_protection, current)
 DO_ERROR(15, SIGSEGV, "reserved", reserved, current)
 DO_ERROR(17, SIGSEGV, "alignment check", alignment_check, current)
+
+asmlinkage void do_general_protection(struct pt_regs * regs, long error_code)
+{
+	if (regs->eflags & VM_MASK) {
+		handle_vm86_fault((struct vm86_regs *) regs, error_code);
+		return;
+	}
+	current->tss.error_code = error_code;
+	current->tss.trap_no = 13;
+	send_sig(SIGSEGV, current, 1);
+	die_if_kernel("general protection",regs,error_code);
+}
 
 asmlinkage void do_nmi(struct pt_regs * regs, long error_code)
 {
@@ -134,20 +148,22 @@ asmlinkage void do_nmi(struct pt_regs * regs, long error_code)
 
 asmlinkage void do_debug(struct pt_regs * regs, long error_code)
 {
+	if (regs->eflags & VM_MASK) {
+		handle_vm86_debug((struct vm86_regs *) regs, error_code);
+		return;
+	}
 	if (current->flags & PF_PTRACED)
 		current->blocked &= ~(1 << (SIGTRAP-1));
 	send_sig(SIGTRAP, current, 1);
 	current->tss.trap_no = 1;
 	current->tss.error_code = error_code;
-	if((regs->cs & 3) == 0) {
-	  /* If this is a kernel mode trap, then reset db7 and allow us to continue */
-	  __asm__("movl $0,%%edx\n\t" \
-		  "movl %%edx,%%db7\n\t" \
-		  : /* no output */ \
-		  : /* no input */ :"dx");
-
-	  return;
-	};
+	if ((regs->cs & 3) == 0) {
+		/* If this is a kernel mode trap, then reset db7 and allow us to continue */
+		__asm__("movl %0,%%db7"
+			: /* no output */
+			: "r" (0));
+		return;
+	}
 	die_if_kernel("debug",regs,error_code);
 }
 

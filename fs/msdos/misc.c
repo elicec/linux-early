@@ -185,7 +185,7 @@ printk("zeroing sector %d\n",sector);
 			else memset(data,0,SECTOR_SIZE);
 		}
 		if (bh) {
-			bh->b_dirt = 1;
+			mark_buffer_dirty(bh, 1);
 			brelse(bh);
 		}
 	}

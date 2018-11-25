@@ -9,6 +9,9 @@
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
+ * Fixes:
+ *		Alan Cox	:	Reformatted. Added ip_rt_local()
+ *		Alan Cox	:	Support for TCP parameters.
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -23,25 +26,27 @@
 
 
 /* This is an entry in the IP routing table. */
-struct rtable {
-  struct rtable		*rt_next;
-  unsigned long		rt_dst;
-  unsigned long		rt_mask;
-  unsigned long		rt_gateway;
-  unsigned char		rt_flags;
-  unsigned char		rt_metric;
-  short			rt_refcnt;
-  unsigned long		rt_use;
-  unsigned short	rt_mss, rt_mtu;
-  struct device		*rt_dev;
+struct rtable 
+{
+	struct rtable		*rt_next;
+	unsigned long		rt_dst;
+	unsigned long		rt_mask;
+	unsigned long		rt_gateway;
+	unsigned char		rt_flags;
+	unsigned char		rt_metric;
+	short			rt_refcnt;
+	unsigned long		rt_use;
+	unsigned short		rt_mss, rt_mtu;
+	struct device		*rt_dev;
 };
 
 
-extern void		rt_flush(struct device *dev);
-extern void		rt_add(short flags, unsigned long addr, unsigned long mask,
-			       unsigned long gw, struct device *dev);
-extern struct rtable	*rt_route(unsigned long daddr, struct options *opt);
-extern int		rt_get_info(char * buffer);
-extern int		rt_ioctl(unsigned int cmd, void *arg);
+extern void		ip_rt_flush(struct device *dev);
+extern void		ip_rt_add(short flags, unsigned long addr, unsigned long mask,
+			       unsigned long gw, struct device *dev, unsigned short);
+extern struct rtable	*ip_rt_route(unsigned long daddr, struct options *opt, unsigned long *src_addr);
+extern struct rtable 	*ip_rt_local(unsigned long daddr, struct options *opt, unsigned long *src_addr);
+extern int		rt_get_info(char * buffer, char **start, off_t offset, int length);
+extern int		ip_rt_ioctl(unsigned int cmd, void *arg);
 
 #endif	/* _ROUTE_H */

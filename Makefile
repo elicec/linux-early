@@ -1,6 +1,6 @@
 VERSION = 1
-PATCHLEVEL = 0
-ALPHA =
+PATCHLEVEL = 1
+SUBLEVEL = 13
 
 all:	Version zImage
 
@@ -9,6 +9,7 @@ all:	Version zImage
 CONFIG_SHELL := $(shell if [ -x "$$BASH" ]; then echo $$BASH; \
 	  else if [ -x /bin/bash ]; then echo /bin/bash; \
 	  else echo sh; fi ; fi)
+TOPDIR	:= $(shell if [ "$$PWD" != "" ]; then echo $$PWD; else pwd; fi)
 
 #
 # Make "config" the default target if there is no configuration file or
@@ -74,8 +75,9 @@ LD86	=ld86 -0
 
 AS	=as
 LD	=ld
+LDFLAGS	=#-qmagic
 HOSTCC	=gcc
-CC	=gcc -D__KERNEL__
+CC	=gcc -D__KERNEL__ -I$(TOPDIR)/include
 MAKE	=make
 CPP	=$(CC) -E
 AR	=ar
@@ -114,12 +116,11 @@ endif
 Version: dummy
 	rm -f tools/version.h
 
+oldconfig:
+	$(CONFIG_SHELL) Configure -d $(OPTS)
+
 config:
-	$(CONFIG_SHELL) Configure $(OPTS) < config.in
-	@if grep -s '^CONFIG_SOUND' .tmpconfig ; then \
-		$(MAKE) -C drivers/sound config; \
-		else : ; fi
-	mv .tmpconfig .config
+	$(CONFIG_SHELL) Configure $(OPTS)
 
 linuxsubdirs: dummy
 	set -e; for i in $(SUBDIRS); do $(MAKE) -C $$i; done
@@ -128,7 +129,7 @@ tools/./version.h: tools/version.h
 
 tools/version.h: $(CONFIGURE) Makefile
 	@./makever.sh
-	@echo \#define UTS_RELEASE \"$(VERSION).$(PATCHLEVEL)$(ALPHA)\" > tools/version.h
+	@echo \#define UTS_RELEASE \"$(VERSION).$(PATCHLEVEL).$(SUBLEVEL)\" > tools/version.h
 	@echo \#define UTS_VERSION \"\#`cat .version` `date`\" >> tools/version.h
 	@echo \#define LINUX_COMPILE_TIME \"`date +%T`\" >> tools/version.h
 	@echo \#define LINUX_COMPILE_BY \"`whoami`\" >> tools/version.h

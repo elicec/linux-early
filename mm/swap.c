@@ -1,7 +1,7 @@
 /*
  *  linux/mm/swap.c
  *
- *  Copyright (C) 1991, 1992  Linus Torvalds
+ *  Copyright (C) 1991, 1992, 1993, 1994  Linus Torvalds
  */
 
 /*
@@ -45,7 +45,6 @@ static struct swap_info_struct {
 	unsigned long max;
 } swap_info[MAX_SWAPFILES];
 
-extern unsigned long free_page_list;
 extern int shm_swap (int);
 
 /*
@@ -265,17 +264,6 @@ static inline int try_to_swap_out(unsigned long * table_ptr)
 }
 
 /*
- * sys_idle() does nothing much: it just searches for likely candidates for
- * swapping out or forgetting about. This speeds up the search when we
- * actually have to swap.
- */
-asmlinkage int sys_idle(void)
-{
-	need_resched = 1;
-	return 0;
-}
-
-/*
  * A new implementation of swap_out().  We do not swap complete processes,
  * but only a small number of blocks, before we continue with the next
  * process.  The number of blocks actually swapped is determined on the
@@ -329,7 +317,7 @@ static int swap_out(unsigned int priority)
 	    }
 
 	    p = task[swap_task];
-	    if(p && p->swappable && p->rss)
+	    if(p && p->mm->swappable && p->mm->rss)
 		break;
 
 	    swap_task++;
@@ -338,23 +326,23 @@ static int swap_out(unsigned int priority)
 	/*
 	 * Determine the number of pages to swap from this process.
 	 */
-	if(! p -> swap_cnt) {
-	    p->dec_flt = (p->dec_flt * 3) / 4 + p->maj_flt - p->old_maj_flt;
-	    p->old_maj_flt = p->maj_flt;
+	if(! p->mm->swap_cnt) {
+	    p->mm->dec_flt = (p->mm->dec_flt * 3) / 4 + p->mm->maj_flt - p->mm->old_maj_flt;
+	    p->mm->old_maj_flt = p->mm->maj_flt;
 
-	    if(p->dec_flt >= SWAP_RATIO / SWAP_MIN) {
-		p->dec_flt = SWAP_RATIO / SWAP_MIN;
-		p->swap_cnt = SWAP_MIN;
-	    } else if(p->dec_flt <= SWAP_RATIO / SWAP_MAX)
-		p->swap_cnt = SWAP_MAX;
+	    if(p->mm->dec_flt >= SWAP_RATIO / SWAP_MIN) {
+		p->mm->dec_flt = SWAP_RATIO / SWAP_MIN;
+		p->mm->swap_cnt = SWAP_MIN;
+	    } else if(p->mm->dec_flt <= SWAP_RATIO / SWAP_MAX)
+		p->mm->swap_cnt = SWAP_MAX;
 	    else
-		p->swap_cnt = SWAP_RATIO / p->dec_flt;
+		p->mm->swap_cnt = SWAP_RATIO / p->mm->dec_flt;
 	}
 
 	/*
 	 * Go through process' page directory.
 	 */
-	for(table = p->swap_table; table < 1024; table++) {
+	for(table = p->mm->swap_table; table < 1024; table++) {
 	    pg_table = ((unsigned long *) p->tss.cr3)[table];
 	    if(pg_table >= high_memory)
 		    continue;
@@ -371,34 +359,34 @@ static int swap_out(unsigned int priority)
 	    /*
 	     * Go through this page table.
 	     */
-	    for(page = p->swap_page; page < 1024; page++) {
+	    for(page = p->mm->swap_page; page < 1024; page++) {
 		switch(try_to_swap_out(page + (unsigned long *) pg_table)) {
 		    case 0:
 			break;
 
 		    case 1:
-			p->rss--;
+			p->mm->rss--;
 			/* continue with the following page the next time */
-			p->swap_table = table;
-			p->swap_page  = page + 1;
-			if((--p->swap_cnt) == 0)
+			p->mm->swap_table = table;
+			p->mm->swap_page  = page + 1;
+			if((--p->mm->swap_cnt) == 0)
 			    swap_task++;
 			return 1;
 
 		    default:
-			p->rss--;
+			p->mm->rss--;
 			break;
 		}
 	    }
 
-	    p->swap_page = 0;
+	    p->mm->swap_page = 0;
 	}
 
 	/*
 	 * Finish work with this process, if we reached the end of the page
 	 * directory.  Mark restart from the beginning the next time.
 	 */
-	p->swap_table = 0;
+	p->mm->swap_table = 0;
     }
     return 0;
 }
@@ -431,7 +419,7 @@ check_task:
 		goto check_task;
 	}
 	p = task[swap_task];
-	if (!p || !p->swappable) {
+	if (!p || !p->mm->swappable) {
 		swap_task++;
 		goto check_task;
 	}
@@ -462,8 +450,8 @@ check_table:
 	}
 	switch (try_to_swap_out(swap_page + (unsigned long *) pg_table)) {
 		case 0: break;
-		case 1: p->rss--; return 1;
-		default: p->rss--;
+		case 1: p->mm->rss--; return 1;
+		default: p->mm->rss--;
 	}
 	swap_page++;
 	goto check_table;
@@ -471,12 +459,12 @@ check_table:
 
 #endif
 
-static int try_to_free_page(void)
+static int try_to_free_page(int priority)
 {
 	int i=6;
 
 	while (i--) {
-		if (shrink_buffers(i))
+	        if (priority != GFP_NOBUFFER && shrink_buffers(i))
 			return 1;
 		if (shm_swap(i))
 			return 1;
@@ -486,16 +474,18 @@ static int try_to_free_page(void)
 	return 0;
 }
 
-/*
- * Note that this must be atomic, or bad things will happen when
- * pages are requested in interrupts (as malloc can do). Thus the
- * cli/sti's.
- */
-static inline void add_mem_queue(unsigned long addr, unsigned long * queue)
+static inline void add_mem_queue(struct mem_list * head, struct mem_list * entry)
 {
-	addr &= PAGE_MASK;
-	*(unsigned long *) addr = *queue;
-	*queue = addr;
+	entry->prev = head;
+	entry->next = head->next;
+	entry->next->prev = entry;
+	head->next = entry;
+}
+
+static inline void remove_mem_queue(struct mem_list * head, struct mem_list * entry)
+{
+	entry->next->prev = entry->prev;
+	entry->prev->next = entry->next;
 }
 
 /*
@@ -509,28 +499,52 @@ static inline void add_mem_queue(unsigned long addr, unsigned long * queue)
  * With the above two rules, you get a straight-line execution path
  * for the normal case, giving better asm-code.
  */
-void free_page(unsigned long addr)
+
+/*
+ * Buddy system. Hairy. You really aren't expected to understand this
+ */
+static inline void free_pages_ok(unsigned long addr, unsigned long order)
+{
+	unsigned long index = addr >> (PAGE_SHIFT + 1 + order);
+	unsigned long mask = PAGE_MASK << order;
+
+	addr &= mask;
+	nr_free_pages += 1 << order;
+	while (order < NR_MEM_LISTS-1) {
+		if (!change_bit(index, free_area_map[order]))
+			break;
+		remove_mem_queue(free_area_list+order, (struct mem_list *) (addr ^ (1+~mask)));
+		order++;
+		index >>= 1;
+		mask <<= 1;
+		addr &= mask;
+	}
+	add_mem_queue(free_area_list+order, (struct mem_list *) addr);
+}
+
+void free_pages(unsigned long addr, unsigned long order)
 {
 	if (addr < high_memory) {
+		unsigned long flag;
 		unsigned short * map = mem_map + MAP_NR(addr);
-
 		if (*map) {
 			if (!(*map & MAP_PAGE_RESERVED)) {
-				unsigned long flag;
-
 				save_flags(flag);
 				cli();
-				if (!--*map) {
-					if (nr_secondary_pages < MAX_SECONDARY_PAGES) {
-						add_mem_queue(addr,&secondary_page_list);
-						nr_secondary_pages++;
-						restore_flags(flag);
-						return;
-					}
-					add_mem_queue(addr,&free_page_list);
-					nr_free_pages++;
-				}
+				if (!--*map)
+					free_pages_ok(addr, order);
 				restore_flags(flag);
+				if(*map == 1) {
+				  int j;
+				  struct buffer_head * bh, *tmp;
+
+				  bh = buffer_pages[MAP_NR(addr)];
+				  if(bh)
+				    for(j = 0, tmp = bh; tmp && (!j || tmp != bh); 
+					tmp = tmp->b_this_page, j++)
+				      if(tmp->b_list == BUF_SHARED && tmp->b_dev != 0xffff)
+					refile_buffer(tmp);
+				}
 			}
 			return;
 		}
@@ -541,74 +555,90 @@ void free_page(unsigned long addr)
 }
 
 /*
- * This is one ugly macro, but it simplifies checking, and makes
- * this speed-critical place reasonably fast, especially as we have
- * to do things with the interrupt flag etc.
- *
- * Note that this #define is heavily optimized to give fast code
- * for the normal case - the if-statements are ordered so that gcc-2.2.2
- * will make *no* jumps for the normal code. Don't touch unless you
- * know what you are doing.
+ * Some ugly macros to speed up __get_free_pages()..
  */
-#define REMOVE_FROM_MEM_QUEUE(queue,nr) \
-	cli(); \
-	if ((result = queue) != 0) { \
-		if (!(result & ~PAGE_MASK) && result < high_memory) { \
-			queue = *(unsigned long *) result; \
-			if (!mem_map[MAP_NR(result)]) { \
-				mem_map[MAP_NR(result)] = 1; \
-				nr--; \
-last_free_pages[index = (index + 1) & (NR_LAST_FREE_PAGES - 1)] = result; \
-				restore_flags(flag); \
-				return result; \
-			} \
-			printk("Free page %08lx has mem_map = %d\n", \
-				result,mem_map[MAP_NR(result)]); \
-		} else \
-			printk("Result = 0x%08lx - memory map destroyed\n", result); \
-		queue = 0; \
-		nr = 0; \
-	} else if (nr) { \
-		printk(#nr " is %d, but " #queue " is empty\n",nr); \
-		nr = 0; \
-	} \
-	restore_flags(flag)
+#define RMQUEUE(order) \
+do { struct mem_list * queue = free_area_list+order; \
+     unsigned long new_order = order; \
+	do { struct mem_list *next = queue->next; \
+		if (queue != next) { \
+			queue->next = next->next; \
+			next->next->prev = queue; \
+			mark_used((unsigned long) next, new_order); \
+			nr_free_pages -= 1 << order; \
+			restore_flags(flags); \
+			EXPAND(next, order, new_order); \
+			return (unsigned long) next; \
+		} new_order++; queue++; \
+	} while (new_order < NR_MEM_LISTS); \
+} while (0)
 
-/*
- * Get physical address of first (actually last :-) free page, and mark it
- * used. If no free pages left, return 0.
- *
- * Note that this is one of the most heavily called functions in the kernel,
- * so it's a bit timing-critical (especially as we have to disable interrupts
- * in it). See the above macro which does most of the work, and which is
- * optimized for a fast normal path of execution.
- */
-unsigned long __get_free_page(int priority)
+static inline int mark_used(unsigned long addr, unsigned long order)
 {
-	extern unsigned long intr_count;
-	unsigned long result, flag;
-	static unsigned long index = 0;
+	return change_bit(addr >> (PAGE_SHIFT+1+order), free_area_map[order]);
+}
 
-	/* this routine can be called at interrupt time via
-	   malloc.  We want to make sure that the critical
-	   sections of code have interrupts disabled. -RAB
-	   Is this code reentrant? */
+#define EXPAND(addr,low,high) \
+do { unsigned long size = PAGE_SIZE << high; \
+	while (high > low) { \
+		high--; size >>= 1; cli(); \
+		add_mem_queue(free_area_list+high, addr); \
+		mark_used((unsigned long) addr, high); \
+		restore_flags(flags); \
+		addr = (struct mem_list *) (size + (unsigned long) addr); \
+	} mem_map[MAP_NR((unsigned long) addr)] = 1; \
+} while (0)
+
+unsigned long __get_free_pages(int priority, unsigned long order)
+{
+	unsigned long flags;
 
 	if (intr_count && priority != GFP_ATOMIC) {
-		printk("gfp called nonatomically from interrupt %08lx\n",
-			((unsigned long *)&priority)[-1]);
-		priority = GFP_ATOMIC;
+		static int count = 0;
+		if (++count < 5) {
+			printk("gfp called nonatomically from interrupt %08lx\n",
+				((unsigned long *)&priority)[-1]);
+			priority = GFP_ATOMIC;
+		}
 	}
-	save_flags(flag);
+	save_flags(flags);
 repeat:
-	REMOVE_FROM_MEM_QUEUE(free_page_list,nr_free_pages);
-	if (priority == GFP_BUFFER)
+	cli();
+	if ((priority==GFP_ATOMIC) || nr_free_pages > MAX_SECONDARY_PAGES) {
+		RMQUEUE(order);
+		restore_flags(flags);
 		return 0;
-	if (priority != GFP_ATOMIC)
-		if (try_to_free_page())
-			goto repeat;
-	REMOVE_FROM_MEM_QUEUE(secondary_page_list,nr_secondary_pages);
+	}
+	restore_flags(flags);
+        if (priority != GFP_BUFFER && try_to_free_page(priority))
+		goto repeat;
 	return 0;
+}
+
+/*
+ * Show free area list (used inside shift_scroll-lock stuff)
+ * We also calculate the percentage fragmentation. We do this by counting the
+ * memory on each free list with the exception of the first item on the list.
+ */
+void show_free_areas(void)
+{
+ 	unsigned long order, flags;
+ 	unsigned long total = 0;
+
+	printk("Free pages:      %6dkB\n ( ",nr_free_pages<<(PAGE_SHIFT-10));
+	save_flags(flags);
+	cli();
+ 	for (order=0 ; order < NR_MEM_LISTS; order++) {
+		struct mem_list * tmp;
+		unsigned long nr = 0;
+		for (tmp = free_area_list[order].next ; tmp != free_area_list + order ; tmp = tmp->next) {
+			nr ++;
+		}
+		total += nr * (4 << order);
+		printk("%lu*%ukB ", nr, 4 << order);
+	}
+	restore_flags(flags);
+	printk("= %lukB)\n", total);
 }
 
 /*
@@ -659,7 +689,7 @@ repeat:
 				read_swap_page(page, (char *) tmp);
 				if (*ppage == page) {
 					*ppage = tmp | (PAGE_DIRTY | PAGE_PRIVATE);
-					++p->rss;
+					++p->mm->rss;
 					swap_free(page);
 					tmp = 0;
 				}
@@ -854,4 +884,35 @@ void si_swapinfo(struct sysinfo *val)
 	val->freeswap <<= PAGE_SHIFT;
 	val->totalswap <<= PAGE_SHIFT;
 	return;
+}
+
+/*
+ * set up the free-area data structures:
+ *   - mark all pages MAP_PAGE_RESERVED
+ *   - mark all memory queues empty
+ *   - clear the memory bitmaps
+ */
+unsigned long free_area_init(unsigned long start_mem, unsigned long end_mem)
+{
+	unsigned short * p;
+	unsigned long mask = PAGE_MASK;
+	int i;
+
+	mem_map = (unsigned short *) start_mem;
+	p = mem_map + MAP_NR(end_mem);
+	start_mem = (unsigned long) p;
+	while (p > mem_map)
+		*--p = MAP_PAGE_RESERVED;
+
+	for (i = 0 ; i < NR_MEM_LISTS ; i++, mask <<= 1) {
+		unsigned long bitmap_size;
+		free_area_list[i].prev = free_area_list[i].next = &free_area_list[i];
+		end_mem = (end_mem + ~mask) & mask;
+		bitmap_size = end_mem >> (PAGE_SHIFT + i);
+		bitmap_size = (bitmap_size + 7) >> 3;
+		free_area_map[i] = (unsigned char *) start_mem;
+		memset((void *) start_mem, 0, bitmap_size);
+		start_mem += bitmap_size;
+	}
+	return start_mem;
 }

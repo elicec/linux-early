@@ -260,7 +260,7 @@ static void rw_intr (Scsi_Cmnd * SCpnt)
 static int sr_open(struct inode * inode, struct file * filp)
 {
 	if(MINOR(inode->i_rdev) >= NR_SR || 
-	   !scsi_CDs[MINOR(inode->i_rdev)].device) return -ENODEV;   /* No such device */
+	   !scsi_CDs[MINOR(inode->i_rdev)].device) return -ENXIO;   /* No such device */
 
         check_disk_change(inode->i_rdev);
 
@@ -624,6 +624,7 @@ unsigned long sr_init1(unsigned long mem_start, unsigned long mem_end){
 };
 
 void sr_attach(Scsi_Device * SDp){
+  SDp->scsi_request_fn = do_sr_request;
   scsi_CDs[NR_SR++].device = SDp;
   if(NR_SR > MAX_SR) panic ("scsi_devices corrupt (sr)");
 };

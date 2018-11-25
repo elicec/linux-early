@@ -30,39 +30,19 @@
 #define	ARPHRD_IEEE802	6		/* IEEE 802.2 Ethernet- huh?	*/
 #define	ARPHRD_ARCNET	7		/* ARCnet			*/
 #define	ARPHRD_APPLETLK	8		/* APPLEtalk			*/
+/* Dummy types for non ARP hardware */
+#define ARPHRD_SLIP	256
+#define ARPHRD_CSLIP	257
+#define ARPHRD_SLIP6	258
+#define ARPHRD_CSLIP6	259
+#define ARPHRD_RSRVD	260		/* Notional KISS type 		*/
+#define ARPHRD_ADAPT	264
 
 /* ARP protocol opcodes. */
 #define	ARPOP_REQUEST	1		/* ARP request			*/
 #define	ARPOP_REPLY	2		/* ARP reply			*/
 #define	ARPOP_RREQUEST	3		/* RARP request			*/
 #define	ARPOP_RREPLY	4		/* RARP reply			*/
-
-
-/*
- * Address Resolution Protocol.
- *
- * See RFC 826 for protocol description.  ARP packets are variable
- * in size; the arphdr structure defines the fixed-length portion.
- * Protocol type values are the same as those for 10 Mb/s Ethernet.
- * It is followed by the variable-sized fields ar_sha, arp_spa,
- * arp_tha and arp_tpa in that order, according to the lengths
- * specified.  Field names used correspond to RFC 826.
- */
-struct arphdr {
-  unsigned short	ar_hrd;		/* format of hardware address	*/
-  unsigned short	ar_pro;		/* format of protocol address	*/
-  unsigned char		ar_hln;		/* length of hardware address	*/
-  unsigned char		ar_pln;		/* length of protocol address	*/
-  unsigned short	ar_op;		/* ARP opcode (command)		*/
-
-  /* The rest is variable in size, according to the sizes above. */
-#if 0
-  unsigned char		ar_sha[];	/* sender hardware address	*/
-  unsigned char		ar_spa[];	/* sender protocol address	*/
-  unsigned char		ar_tha[];	/* target hardware address	*/
-  unsigned char		ar_tpa[];	/* target protocol address	*/
-#endif	/* not actually included! */
-};
 
 
 /* ARP ioctl request. */
@@ -73,7 +53,6 @@ struct arpreq {
 };
 
 /* ARP Flag values. */
-#define	ATF_INUSE	0x01		/* entry in use			*/
 #define ATF_COM		0x02		/* completed entry (ha valid)	*/
 #define	ATF_PERM	0x04		/* permanent entry		*/
 #define	ATF_PUBL	0x08		/* publish entry		*/

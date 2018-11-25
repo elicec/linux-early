@@ -75,7 +75,7 @@ static int parse_options(char *options,char *check,char *conversion,uid_t *uid,
 	*conversion = 'b';
 	*uid = current->uid;
 	*gid = current->gid;
-	*umask = current->umask;
+	*umask = current->fs->umask;
 	*debug = *fat = *quiet = 0;
 	if (!options) return 1;
 	for (this_char = strtok(options,","); this_char; this_char = strtok(NULL,",")) {
@@ -415,7 +415,7 @@ void msdos_write_inode(struct inode *inode)
 	date_unix2dos(inode->i_mtime,&raw_entry->time,&raw_entry->date);
 	raw_entry->time = CT_LE_W(raw_entry->time);
 	raw_entry->date = CT_LE_W(raw_entry->date);
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	brelse(bh);
 }
 

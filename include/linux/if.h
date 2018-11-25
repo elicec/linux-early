@@ -22,44 +22,6 @@
 #include <linux/types.h>		/* for "caddr_t" et al		*/
 #include <linux/socket.h>		/* for "struct sockaddr" et al	*/
 
-
-/* Structure defining a queue for a network interface. */
-struct ifnet {
-  char		*if_name;		/* name, e.g. ``en'' or ``lo''	*/
-  short		if_unit;		/* sub-unit for device driver	*/
-  short		if_mtu;			/* maximum transmission unit	*/
-  short		if_flags;		/* up/down, broadcast, etc.	*/
-  short		if_timer;		/* time 'til if_watchdog called	*/
-  int		if_metric;		/* routing metric (not used)	*/
-  struct	ifaddr *if_addrlist;	/* linked list of addrs per if	*/
-  struct	ifqueue {
-#ifdef not_yet_in_linux
-	struct mbuf	*ifq_head;
-	struct mbuf	*ifq_tail;
-	int		ifq_len;
-	int		ifq_maxlen;
-	int		ifq_drops;
-#endif
-  } if_snd;				/* output queue			*/
-
-  /* Procedure handles. */
-  int		(*if_init)();		/* init routine			*/
-  int		(*if_output)();		/* output routine		*/
-  int		(*if_ioctl)();		/* ioctl routine		*/
-  int		(*if_reset)();		/* bus reset routine		*/
-  int		(*if_watchdog)();	/* timer routine		*/
-
-  /* Generic interface statistics. */
-  int		if_ipackets;		/* packets recv'd on interface	*/
-  int		if_ierrors;		/* input errors on interface	*/
-  int		if_opackets;		/* packets sent on interface	*/
-  int		if_oerrors;		/* output errors on interface	*/
-  int		if_collisions;		/* collisions on CSMA i'faces	*/
-
-  /* Linked list: pointer to next interface. */
-  struct ifnet	*if_next;
-};
-
 /* Standard interface flags. */
 #define	IFF_UP		0x1		/* interface is up		*/
 #define	IFF_BROADCAST	0x2		/* broadcast address valid	*/
@@ -69,11 +31,12 @@ struct ifnet {
 #define	IFF_NOTRAILERS	0x20		/* avoid use of trailers	*/
 #define	IFF_RUNNING	0x40		/* resources allocated		*/
 #define	IFF_NOARP	0x80		/* no ARP protocol		*/
-
-/* These are not yet used: */
 #define	IFF_PROMISC	0x100		/* recve all packets		*/
+/* These are not yet used: */
 #define	IFF_ALLMULTI	0x200		/* recve all multicast packets	*/
 
+#define IFF_MASTER	0x400		/* master of a load balancer 	*/
+#define IFF_SLAVE	0x800		/* slave of a load balancer	*/
 
 /*
  * The ifaddr structure contains information about one address
@@ -95,6 +58,26 @@ struct ifaddr {
 #define	ifa_dstaddr	ifa_ifu.ifu_dstaddr	/* other end of link	*/
 
 /*
+ *	Device mapping structure. I'd just gone off and designed a 
+ *	beautiful scheme using only loadable modules with arguments
+ *	for driver options and along come the PCMICA people 8)
+ *
+ *	Ah well. The get() side of this is good for WDSETUP, and it'll
+ *	be handy for debugging things. The set side is fine for now and
+ *	being very small might be worth keeping for clean configuration.
+ */
+
+struct ifmap {
+	unsigned long mem_start;
+	unsigned long mem_end;
+	unsigned short base_addr; 
+	unsigned char irq;
+	unsigned char dma;
+	unsigned char port;
+	/* 3 bytes spare */
+};
+
+/*
  * Interface request structure used for socket
  * ioctl's.  All interface ioctl's must have parameter
  * definitions which begin with ifr_name.  The
@@ -106,7 +89,7 @@ struct ifreq {
 	union
 	{
 		char	ifrn_name[IFNAMSIZ];		/* if name, e.g. "en0" */
-		char	ifrn_hwaddr[IFHWADDRLEN];
+		char	ifrn_hwaddr[IFHWADDRLEN];	/* Obsolete */
 	} ifr_ifrn;
 	
 	union {
@@ -114,15 +97,19 @@ struct ifreq {
 		struct	sockaddr ifru_dstaddr;
 		struct	sockaddr ifru_broadaddr;
 		struct	sockaddr ifru_netmask;
+		struct  sockaddr ifru_hwaddr;
 		short	ifru_flags;
 		int	ifru_metric;
 		int	ifru_mtu;
+		struct  ifmap ifru_map;
+		char	ifru_slave[IFNAMSIZ];	/* Just fits the size */
 		caddr_t	ifru_data;
 	} ifr_ifru;
 };
 
 #define ifr_name	ifr_ifrn.ifrn_name	/* interface name 	*/
-#define ifr_hwaddr	ifr_ifrn.ifrn_hwaddr	/* interface hardware   */
+#define old_ifr_hwaddr	ifr_ifrn.ifrn_hwaddr	/* interface hardware   */
+#define ifr_hwaddr	ifr_ifru.ifru_hwaddr	/* MAC address 		*/
 #define	ifr_addr	ifr_ifru.ifru_addr	/* address		*/
 #define	ifr_dstaddr	ifr_ifru.ifru_dstaddr	/* other end of p-p lnk	*/
 #define	ifr_broadaddr	ifr_ifru.ifru_broadaddr	/* broadcast address	*/
@@ -130,6 +117,8 @@ struct ifreq {
 #define	ifr_flags	ifr_ifru.ifru_flags	/* flags		*/
 #define	ifr_metric	ifr_ifru.ifru_metric	/* metric		*/
 #define	ifr_mtu		ifr_ifru.ifru_mtu	/* mtu			*/
+#define ifr_map		ifr_ifru.ifru_map	/* device map		*/
+#define ifr_slave	ifr_ifru.ifru_slave	/* slave device		*/
 #define	ifr_data	ifr_ifru.ifru_data	/* for use by interface	*/
 
 /*

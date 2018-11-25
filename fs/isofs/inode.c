@@ -1,7 +1,7 @@
 /*
  *  linux/fs/isofs/inode.c
  * 
- *  (C) 1992  Eric Youngdale Modified for ISO9660 filesystem.
+ *  (C) 1992, 1993, 1994  Eric Youngdale Modified for ISO9660 filesystem.
  *
  *  (C) 1991  Linus Torvalds - minix filesystem
  */
@@ -354,7 +354,7 @@ void isofs_read_inode(struct inode * inode)
 	if ((inode->i_ino & (bufsize - 1)) + *pnt > bufsize){
 		cpnt = kmalloc(1 << ISOFS_BLOCK_BITS, GFP_KERNEL);
 		if (cpnt == NULL) {
-			printk(KERN_INFO "NoMem ISO inode %d\n",inode->i_ino);
+			printk(KERN_INFO "NoMem ISO inode %lu\n",inode->i_ino);
 			brelse(bh);
 			goto fail;
 		}
@@ -477,6 +477,15 @@ void isofs_read_inode(struct inode * inode)
 	brelse(bh);
 	
 	inode->i_op = NULL;
+
+	/* A volume number of 0 is nonsense.  Disable checking if we see
+	   this */
+	if (inode->i_sb->u.isofs_sb.s_cruft == 'n' && 
+	    isonum_723 (raw_inode->volume_sequence_number) == 0) {
+	  printk("Warning: defective cdrom.  Enabling \"cruft\" mount option.\n");
+	  inode->i_sb->u.isofs_sb.s_cruft = 'y';
+	}
+
 	if (inode->i_sb->u.isofs_sb.s_cruft != 'y' && 
 	    isonum_723 (raw_inode->volume_sequence_number) != 1) {
 		printk("Multi volume CD somehow got mounted.\n");
@@ -600,7 +609,8 @@ int isofs_lookup_grandparent(struct inode * parent, int extent)
 			brelse(bh);
 			offset = 0;
 			block++;
-			if(block & 1) return -1;
+			if((block & 1) && (ISOFS_BLOCK_BITS - bufbits))
+			  return -1;
 			if (!block
 			    || !(bh = bread(parent->i_dev,block, bufsize)))
 				return -1;

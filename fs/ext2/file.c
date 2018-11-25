@@ -78,6 +78,7 @@ static int ext2_file_read (struct inode * inode, struct file * filp,
 	int read, left, chars;
 	int block, blocks, offset;
 	int bhrequest, uptodate;
+	int clusterblocks;
 	struct buffer_head ** bhb, ** bhe;
 	struct buffer_head * bhreq[NBUF];
 	struct buffer_head * buflist[NBUF];
@@ -112,8 +113,8 @@ static int ext2_file_read (struct inode * inode, struct file * filp,
 	blocks = (left + offset + sb->s_blocksize - 1) >> EXT2_BLOCK_SIZE_BITS(sb);
 	bhb = bhe = buflist;
 	if (filp->f_reada) {
-		blocks += read_ahead[MAJOR(inode->i_dev)] >>
-			(EXT2_BLOCK_SIZE_BITS(sb) - 9);
+	        if (blocks < read_ahead[MAJOR(inode->i_dev)] >> (EXT2_BLOCK_SIZE_BITS(sb) - 9))
+	            blocks = read_ahead[MAJOR(inode->i_dev)] >> (EXT2_BLOCK_SIZE_BITS(sb) - 9);
 		if (block + blocks > size)
 			blocks = size - block;
 	}
@@ -130,11 +131,18 @@ static int ext2_file_read (struct inode * inode, struct file * filp,
 	 * buffers and caches.
 	 */
 
+	clusterblocks = 0;
+
 	do {
 		bhrequest = 0;
 		uptodate = 1;
 		while (blocks) {
 			--blocks;
+#if 1
+			if(!clusterblocks) clusterblocks = ext2_getcluster(inode, block);
+			if(clusterblocks) clusterblocks--;
+#endif
+
 			*bhb = ext2_getblk (inode, block++, 0, &err);
 			if (*bhb && !(*bhb)->b_uptodate) {
 				uptodate = 0;
@@ -241,10 +249,7 @@ static int ext2_file_write (struct inode * inode, struct file * filp,
 			      inode->i_mode);
 		return -EINVAL;
 	}
-/*
- * ok, append may not work when many processes are writing at the same time
- * but so what. That way leads to madness anyway.
- */
+	down(&inode->i_sem);
 	if (filp->f_flags & O_APPEND)
 		pos = inode->i_size;
 	else
@@ -280,9 +285,10 @@ static int ext2_file_write (struct inode * inode, struct file * filp,
 		memcpy_fromfs (p, buf, c);
 		buf += c;
 		bh->b_uptodate = 1;
-		bh->b_dirt = 1;
+		mark_buffer_dirty(bh, 0);
 		brelse (bh);
 	}
+	up(&inode->i_sem);
 	inode->i_ctime = inode->i_mtime = CURRENT_TIME;
 	filp->f_pos = pos;
 	inode->i_dirt = 1;

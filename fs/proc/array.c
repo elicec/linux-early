@@ -4,7 +4,15 @@
  *  Copyright (C) 1992  by Linus Torvalds
  *  based on ideas by Darren Senn
  *
- *  stat,statm extensions by Michael K. Johnson, johnsonm@stolaf.edu
+ * Fixes:
+ * Michael. K. Johnson: stat,statm extensions.
+ *                      <johnsonm@stolaf.edu>
+ *
+ * Pauline Middelink :  Made cmdline,envline only break at '\0's, to
+ *                      make sure SET_PROCTITLE works. Also removed
+ *                      bad '!' which forced addres recalculation for
+ *                      EVERY character on the current page.
+ *                      <middelin@calvin.iaf.nl>
  */
 
 #include <linux/types.h>
@@ -88,28 +96,38 @@ static int get_loadavg(char * buffer)
 
 static int get_kstat(char * buffer)
 {
-        return sprintf(buffer,	"cpu  %u %u %u %lu\n"
-        			"disk %u %u %u %u\n"
-        			"page %u %u\n"
-        			"swap %u %u\n"
-        			"intr %u\n"
-        			"ctxt %u\n"
-        			"btime %lu\n",
-                kstat.cpu_user,
-                kstat.cpu_nice,
-                kstat.cpu_system,
-                jiffies - (kstat.cpu_user + kstat.cpu_nice + kstat.cpu_system),
-                kstat.dk_drive[0],
-                kstat.dk_drive[1],
-                kstat.dk_drive[2],
-                kstat.dk_drive[3],
-                kstat.pgpgin,
-                kstat.pgpgout,
-                kstat.pswpin,
-                kstat.pswpout,
-                kstat.interrupts,
-                kstat.context_swtch,
-                xtime.tv_sec - jiffies / HZ);
+	int i, len;
+	unsigned sum = 0;
+
+	for (i = 0 ; i < 16 ; i++)
+		sum += kstat.interrupts[i];
+	len = sprintf(buffer,
+		"cpu  %u %u %u %lu\n"
+		"disk %u %u %u %u\n"
+		"page %u %u\n"
+		"swap %u %u\n"
+		"intr %u",
+		kstat.cpu_user,
+		kstat.cpu_nice,
+		kstat.cpu_system,
+		jiffies - (kstat.cpu_user + kstat.cpu_nice + kstat.cpu_system),
+		kstat.dk_drive[0],
+		kstat.dk_drive[1],
+		kstat.dk_drive[2],
+		kstat.dk_drive[3],
+		kstat.pgpgin,
+		kstat.pgpgout,
+		kstat.pswpin,
+		kstat.pswpout,
+		sum);
+	for (i = 0 ; i < 16 ; i++)
+		len += sprintf(buffer + len, " %u", kstat.interrupts[i]);
+	len += sprintf(buffer + len,
+		"\nctxt %u\n"
+		"btime %lu\n",
+		kstat.context_swtch,
+		xtime.tv_sec - jiffies / HZ);
+	return len;
 }
 
 
@@ -167,12 +185,12 @@ static unsigned long get_phys_addr(struct task_struct ** p, unsigned long ptr)
 	if (!p || !*p || ptr >= TASK_SIZE)
 		return 0;
 	page = *PAGE_DIR_OFFSET((*p)->tss.cr3,ptr);
-	if (!(page & 1))
+	if (!(page & PAGE_PRESENT))
 		return 0;
 	page &= PAGE_MASK;
 	page += PAGE_PTR(ptr);
 	page = *(unsigned long *) page;
-	if (!(page & 1))
+	if (!(page & PAGE_PRESENT))
 		return 0;
 	page &= PAGE_MASK;
 	page += ptr & ~PAGE_MASK;
@@ -190,7 +208,7 @@ static int get_array(struct task_struct ** p, unsigned long start, unsigned long
 	for (;;) {
 		addr = get_phys_addr(p, start);
 		if (!addr)
-			return result;
+			goto ready;
 		do {
 			c = *(char *) addr;
 			if (!c)
@@ -198,13 +216,18 @@ static int get_array(struct task_struct ** p, unsigned long start, unsigned long
 			if (size < PAGE_SIZE)
 				buffer[size++] = c;
 			else
-				return result;
+				goto ready;
 			addr++;
 			start++;
-			if (start >= end)
-				return result;
-		} while (!(addr & ~PAGE_MASK));
+			if (!c && start >= end)
+				goto ready;
+		} while (addr & ~PAGE_MASK);
 	}
+ready:
+	/* remove the trailing blanks, used to fillout argv,envp space */
+	while (result>0 && buffer[result-1]==' ')
+		result--;
+	return result;
 }
 
 static int get_env(int pid, char * buffer)
@@ -213,7 +236,7 @@ static int get_env(int pid, char * buffer)
 
 	if (!p || !*p)
 		return 0;
-	return get_array(p, (*p)->env_start, (*p)->env_end, buffer);
+	return get_array(p, (*p)->mm->env_start, (*p)->mm->env_end, buffer);
 }
 
 static int get_arg(int pid, char * buffer)
@@ -222,7 +245,7 @@ static int get_arg(int pid, char * buffer)
 
 	if (!p || !*p)
 		return 0;
-	return get_array(p, (*p)->arg_start, (*p)->arg_end, buffer);
+	return get_array(p, (*p)->mm->arg_start, (*p)->mm->arg_end, buffer);
 }
 
 static unsigned long get_wchan(struct task_struct *p)
@@ -271,7 +294,7 @@ static int get_stat(int pid, char * buffer)
 	if (vsize) {
 		eip = KSTK_EIP(vsize);
 		esp = KSTK_ESP(vsize);
-		vsize = (*p)->brk - (*p)->start_code + PAGE_SIZE-1;
+		vsize = (*p)->mm->brk - (*p)->mm->start_code + PAGE_SIZE-1;
 		if (esp)
 			vsize += TASK_SIZE - esp;
 	}
@@ -283,13 +306,12 @@ static int get_stat(int pid, char * buffer)
 		default: sigcatch |= bit;
 		} bit <<= 1;
 	}
-	tty_pgrp = (*p)->tty;
-	if (tty_pgrp > 0 && tty_table[tty_pgrp])
-		tty_pgrp = tty_table[tty_pgrp]->pgrp;
+	if ((*p)->tty)
+		tty_pgrp = (*p)->tty->pgrp;
 	else
 		tty_pgrp = -1;
 	return sprintf(buffer,"%d (%s) %c %d %d %d %d %d %lu %lu \
-%lu %lu %lu %ld %ld %ld %ld %ld %ld %lu %lu %ld %lu %u %u %lu %lu %lu %lu %lu %lu \
+%lu %lu %lu %ld %ld %ld %ld %ld %ld %lu %lu %ld %lu %lu %u %lu %lu %lu %lu %lu %lu \
 %lu %lu %lu %lu\n",
 		pid,
 		(*p)->comm,
@@ -297,13 +319,13 @@ static int get_stat(int pid, char * buffer)
 		(*p)->p_pptr->pid,
 		(*p)->pgrp,
 		(*p)->session,
-		(*p)->tty,
+	        (*p)->tty ? (*p)->tty->device : 0,
 		tty_pgrp,
 		(*p)->flags,
-		(*p)->min_flt,
-		(*p)->cmin_flt,
-		(*p)->maj_flt,
-		(*p)->cmaj_flt,
+		(*p)->mm->min_flt,
+		(*p)->mm->cmin_flt,
+		(*p)->mm->maj_flt,
+		(*p)->mm->cmaj_flt,
 		(*p)->utime,
 		(*p)->stime,
 		(*p)->cutime,
@@ -316,11 +338,11 @@ static int get_stat(int pid, char * buffer)
 		(*p)->it_real_value,
 		(*p)->start_time,
 		vsize,
-		(*p)->rss, /* you might want to shift this left 3 */
+		(*p)->mm->rss, /* you might want to shift this left 3 */
 		(*p)->rlim[RLIMIT_RSS].rlim_cur,
-		(*p)->start_code,
-		(*p)->end_code,
-		(*p)->start_stack,
+		(*p)->mm->start_code,
+		(*p)->mm->end_code,
+		(*p)->mm->start_stack,
 		esp,
 		eip,
 		(*p)->signal,
@@ -339,7 +361,7 @@ static int get_statm(int pid, char * buffer)
 
 	if (!p || !*p)
 		return 0;
-	tpag = (*p)->end_code / PAGE_SIZE;
+	tpag = (*p)->mm->end_code / PAGE_SIZE;
 	if ((*p)->state != TASK_ZOMBIE) {
 	  pagedir = (unsigned long *) (*p)->tss.cr3;
 	  for (i = 0; i < 0x300; ++i) {
@@ -386,7 +408,7 @@ static int get_maps(int pid, char *buf)
 	if (!p || !*p)
 		return 0;
 
-	for(map = (*p)->mmap; map != NULL; map = map->vm_next) {
+	for(map = (*p)->mm->mmap; map != NULL; map = map->vm_next) {
 		char str[7], *cp = str;
 		int prot = map->vm_page_prot;
 		int perms, flags;
@@ -442,6 +464,8 @@ static int get_maps(int pid, char *buf)
 }
 
 extern int get_module_list(char *);
+extern int get_device_list(char *);
+extern int get_filesystem_list(char *);
 
 static int array_read(struct inode * inode, struct file * file,char * buf, int count)
 {
@@ -498,6 +522,12 @@ static int array_read(struct inode * inode, struct file * file,char * buf, int c
 			break;
 		case 17:
 			length = get_kstat(page);
+			break;
+		case 18:
+			length = get_device_list(page);
+			break;
+		case 19:
+			length = get_filesystem_list(page);
 			break;
 		default:
 			free_page((unsigned long) page);

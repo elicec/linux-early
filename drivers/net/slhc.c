@@ -36,8 +36,15 @@
  *			allow zero or one slots
  *			separate routines
  *			status display
+ *
+ *
+ *	This module is a difficult issue. Its clearly inet code but its also clearly
+ *	driver code belonging close to PPP and SLIP
  */
 
+#include <linux/config.h>
+#ifdef CONFIG_INET
+/* Entire module is for IP only */
 #include <linux/types.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
@@ -47,15 +54,14 @@
 #include <linux/termios.h>
 #include <linux/in.h>
 #include <linux/fcntl.h>
-#include "inet.h"
-#include "dev.h"
+#include <linux/inet.h>
+#include <linux/netdevice.h>
 #include "ip.h"
 #include "protocol.h"
 #include "icmp.h"
 #include "tcp.h"
-#include "skbuff.h"
+#include <linux/skbuff.h>
 #include "sock.h"
-#include "arp.h"
 #include <linux/errno.h>
 #include <linux/timer.h>
 #include <asm/system.h>
@@ -63,11 +69,9 @@
 #include <linux/mm.h>
 #include "slhc.h"
 
-#define DPRINT(x)
-
 int last_retran;
 
-static unsigned char *encode(unsigned char *cp,int n);
+static unsigned char *encode(unsigned char *cp, unsigned short n);
 static long decode(unsigned char **cpp);
 static unsigned char * put16(unsigned char *cp, unsigned short x);
 static unsigned short pull16(unsigned char **cpp);
@@ -154,7 +158,7 @@ slhc_free(struct slcompress *comp)
 
 
 /* Put a short in host order into a char array in network order */
-static unsigned char *
+static inline unsigned char *
 put16(unsigned char *cp, unsigned short x)
 {
 	*cp++ = x >> 8;
@@ -166,7 +170,7 @@ put16(unsigned char *cp, unsigned short x)
 
 /* Encode a number */
 unsigned char *
-encode(unsigned char *cp, int n)
+encode(unsigned char *cp, unsigned short n)
 {
 	if(n >= 256 || n == 0){
 		*cp++ = 0;
@@ -230,8 +234,6 @@ slhc_compress(struct slcompress *comp, unsigned char *icp, int isize,
 	/* Bail if this packet isn't TCP, or is an IP fragment */
 	if(ip->protocol != IPPROTO_TCP || (ntohs(ip->frag_off) & 0x1fff) || 
 				       (ip->frag_off & 32)){
-		DPRINT(("comp: noncomp 1 %d %d %d\n", ip->protocol, 
-		      ntohs(ip->frag_off), ip->frag_off));
 		/* Send as regular IP */
 		if(ip->protocol != IPPROTO_TCP)
 			comp->sls_o_nontcp++;
@@ -249,8 +251,6 @@ slhc_compress(struct slcompress *comp, unsigned char *icp, int isize,
 	 */
 	if(th->syn || th->fin || th->rst ||
 	    ! (th->ack)){
-		DPRINT(("comp: noncomp 2 %x %x %d %d %d %d\n", ip, th, 
-		       th->syn, th->fin, th->rst, th->ack));
 		/* TCP connection stuff; send as regular IP */
 		comp->sls_o_tcp++;
 		return isize;
@@ -294,7 +294,6 @@ slhc_compress(struct slcompress *comp, unsigned char *icp, int isize,
 	 */
 	comp->sls_o_misses++;
 	comp->xmit_oldest = lcs->cs_this;
-	DPRINT(("comp: not found\n"));
 	goto uncompressed;
 
 found:
@@ -335,7 +334,6 @@ found:
 	 || th->doff != cs->cs_tcp.doff
 	 || (ip->ihl > 5 && memcmp(ip+1,cs->cs_ipopt,((ip->ihl)-5)*4) != 0)
 	 || (th->doff > 5 && memcmp(th+1,cs->cs_tcpopt,((th->doff)-5)*4 != 0))){
-		DPRINT(("comp: incompat\n"));
 		goto uncompressed;
 	}
 	
@@ -354,7 +352,6 @@ found:
 		 * implementation should never do this but RFC793
 		 * doesn't prohibit the change so we have to deal
 		 * with it. */
-		DPRINT(("comp: urg incompat\n"));
 		goto uncompressed;
 	}
 	if((deltaS = ntohs(th->window) - ntohs(oth->window)) != 0){
@@ -385,7 +382,6 @@ found:
 		if(ip->tot_len != cs->cs_ip.tot_len && 
 		   ntohs(cs->cs_ip.tot_len) == hlen)
 			break;
-		DPRINT(("comp: retrans\n"));
 		goto uncompressed;
 		break;
 	case SPECIAL_I:
@@ -393,7 +389,6 @@ found:
 		/* actual changes match one of our special case encodings --
 		 * send packet uncompressed.
 		 */
-		DPRINT(("comp: special\n"));
 		goto uncompressed;
 	case NEW_S|NEW_A:
 		if(deltaS == deltaA &&
@@ -444,7 +439,6 @@ found:
 	}
 	cp = put16(cp,(short)deltaA);	/* Write TCP checksum */
 /* deltaS is now the size of the change section of the compressed header */
-	DPRINT(("comp: %x %x %x %d %d\n", icp, cp, new_seq, hlen, deltaS));
 	memcpy(cp,new_seq,deltaS);	/* Write list of deltas */
 	memcpy(cp+deltaS,icp+hlen,isize-hlen);
 	comp->sls_o_compressed++;
@@ -487,7 +481,6 @@ slhc_uncompress(struct slcompress *comp, unsigned char *icp, int isize)
 	comp->sls_i_compressed++;
 	if(isize < 3){
 		comp->sls_i_error++;
-		DPRINT(("uncomp: runt\n"));
 		return 0;
 	}
 	changes = *cp++;
@@ -507,7 +500,6 @@ slhc_uncompress(struct slcompress *comp, unsigned char *icp, int isize)
 		 * explicit state index, we have to toss the packet. */
 		if(comp->flags & SLF_TOSS){
 			comp->sls_i_tossed++;
-			DPRINT(("uncomp: toss\n"));
 			return 0;
 		}
 	}
@@ -516,7 +508,6 @@ slhc_uncompress(struct slcompress *comp, unsigned char *icp, int isize)
 	ip = &cs->cs_ip;
 
 	if((x = pull16(&cp)) == -1) {	/* Read the TCP checksum */
-		DPRINT(("uncomp: bad tcp chk\n"));
 		goto bad;
         }
 	thp->check = htons(x);
@@ -549,7 +540,6 @@ slhc_uncompress(struct slcompress *comp, unsigned char *icp, int isize)
 		if(changes & NEW_U){
 			thp->urg = 1;
 			if((x = decode(&cp)) == -1) {
-				DPRINT(("uncomp: bad U\n"));
 				goto bad;
 			}
 			thp->urg_ptr = htons(x);
@@ -557,21 +547,18 @@ slhc_uncompress(struct slcompress *comp, unsigned char *icp, int isize)
 			thp->urg = 0;
 		if(changes & NEW_W){
 			if((x = decode(&cp)) == -1) {
-				DPRINT(("uncomp: bad W\n"));
 				goto bad;
 			}	
 			thp->window = htons( ntohs(thp->window) + x);
 		}
 		if(changes & NEW_A){
 			if((x = decode(&cp)) == -1) {
-				DPRINT(("uncomp: bad A\n"));
 				goto bad;
 			}
 			thp->ack_seq = htonl( ntohl(thp->ack_seq) + x);
 		}
 		if(changes & NEW_S){
 			if((x = decode(&cp)) == -1) {
-				DPRINT(("uncomp: bad S\n"));
 				goto bad;
 			}
 			thp->seq = htonl( ntohl(thp->seq) + x);
@@ -580,7 +567,6 @@ slhc_uncompress(struct slcompress *comp, unsigned char *icp, int isize)
 	}
 	if(changes & NEW_I){
 		if((x = decode(&cp)) == -1) {
-			DPRINT(("uncomp: bad I\n"));
 			goto bad;
 		}
 		ip->id = htons (ntohs (ip->id) + x);
@@ -599,8 +585,6 @@ slhc_uncompress(struct slcompress *comp, unsigned char *icp, int isize)
 	len += hdrlen;
 	ip->tot_len = htons(len);
 	ip->check = 0;
-
-	DPRINT(("uncomp: %d %d %d %d\n", cp - icp, hdrlen, isize, len));
 
 	memmove(icp + hdrlen, cp, len - hdrlen);
 
@@ -623,7 +607,6 @@ slhc_uncompress(struct slcompress *comp, unsigned char *icp, int isize)
 	  cp += ((thp->doff) - 5) * 4;
 	}
 
-if (inet_debug == DBG_SLIP) printk("\runcomp: change %x len %d\n", changes, len);
 	return len;
 bad:
 	comp->sls_i_error++;
@@ -723,3 +706,4 @@ void slhc_o_status(struct slcompress *comp)
 	}
 }
 
+#endif /* CONFIG_INET */

@@ -170,6 +170,7 @@ static int lp_write_interrupt(struct inode * inode, struct file * file, char * b
 				current->timeout = jiffies + LP_TIMEOUT_INTERRUPT;
 				interruptible_sleep_on(&lp->lp_wait_q);
 				outb_p((LP_PSELECP|LP_PINITP), (LP_C(minor)));
+				sti();
 				if (current->signal & ~current->blocked) {
 					if (total_bytes_written + bytes_written)
 						return total_bytes_written + bytes_written;
@@ -444,10 +445,10 @@ long lp_init(long kmem_start)
 		for (testvalue = 0 ; testvalue < LP_DELAY ; testvalue++)
 			;
 		testvalue = inb_p(LP_B(offset));
-		if (testvalue != 255) {
+		if (testvalue == LP_DUMMY) {
 			LP_F(offset) |= LP_EXIST;
 			lp_reset(offset);
-			printk("lp_init: lp%d exists (%d), ", offset, testvalue);
+			printk("lp_init: lp%d exists, ", offset);
 			if (LP_IRQ(offset))
 				printk("using IRQ%d\n", LP_IRQ(offset));
 			else

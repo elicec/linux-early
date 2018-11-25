@@ -19,18 +19,6 @@
 #define _LINUX_SOCKIOS_H
 
 /* This section will go away soon! */
-#if 1	/* FIXME: */
-#define MAX_IP_NAME	20
-#define IP_SET_DEV	0x2401
-
-struct ip_config {
-  char		name[MAX_IP_NAME];
-  unsigned long	paddr;
-  unsigned long	router;
-  unsigned long	net;
-  unsigned long	up:1,destroy:1;
-};
-#endif	/* FIXME: */
 
 /* Socket-level I/O control calls. */
 #define FIOSETOWN 	0x8901
@@ -38,6 +26,7 @@ struct ip_config {
 #define FIOGETOWN	0x8903
 #define SIOCGPGRP	0x8904
 #define SIOCATMARK	0x8905
+#define SIOCGSTAMP	0x8096		/* Get stamp */
 
 /* Routing table calls. */
 #define SIOCADDRT	0x890B		/* add routing table entry	*/
@@ -63,10 +52,13 @@ struct ip_config {
 #define SIOCSIFMEM	0x8920		/* set memory address (BSD)	*/
 #define SIOCGIFMTU	0x8921		/* get MTU size			*/
 #define SIOCSIFMTU	0x8922		/* set MTU size			*/
-#define	SIOCGIFHWADDR	0x8923		/* get hardware address		*/
+#define	OLD_SIOCGIFHWADDR	0x8923		/* get hardware address		*/
 #define	SIOCSIFHWADDR	0x8924		/* set hardware address (NI)	*/
 #define SIOCGIFENCAP	0x8925		/* get/set slip encapsulation   */
 #define SIOCSIFENCAP	0x8926		
+#define SIOCGIFHWADDR	0x8927		/* Get hardware address		*/
+#define SIOCGIFSLAVE	0x8929		/* Driver slaving support	*/
+#define SIOCSIFSLAVE	0x8930
 
 /* Routing table calls (oldrtent - don't use) */
 #define SIOCADDRTOLD	0x8940		/* add routing table entry	*/
@@ -76,5 +68,27 @@ struct ip_config {
 #define SIOCDARP	0x8950		/* delete ARP table entry	*/
 #define SIOCGARP	0x8951		/* get ARP table entry		*/
 #define SIOCSARP	0x8952		/* set ARP table entry		*/
+
+/* RARP cache control calls. */
+#define SIOCDRARP	0x8960		/* delete RARP table entry	*/
+#define SIOCGRARP	0x8961		/* get RARP table entry		*/
+#define SIOCSRARP	0x8962		/* set RARP table entry		*/
+
+/* Driver configuration calls */
+
+#define SIOCGIFMAP	0x8970		/* Get device parameters	*/
+#define SIOCSIFMAP	0x8971		/* Set device parameters	*/
+
+/* Device private ioctl calls */
+
+/*
+ *	These 16 ioctls are available to devices via the do_ioctl() device
+ *	vector. Each device should include this file and redefine these names
+ *	as their own. Because these are device dependant it is a good idea
+ *	_NOT_ to issue them to random objects and hope.
+ */
+ 
+#define SIOCDEVPRIVATE	0x89F0	/* to 89FF */
+
 
 #endif	/* _LINUX_SOCKIOS_H */

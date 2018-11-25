@@ -28,7 +28,6 @@
 #define NR_INODE 2048	/* this should be bigger than NR_FILE */
 #define NR_FILE 1024	/* this can well be larger on a larger system */
 #define NR_SUPER 32
-#define NR_HASH 997
 #define NR_IHASH 131
 #define NR_FILE_LOCKS 64
 #define BLOCK_SIZE 1024
@@ -50,6 +49,7 @@ extern unsigned long file_table_init(unsigned long start, unsigned long end);
 #define MAJOR(a) (int)((unsigned short)(a) >> 8)
 #define MINOR(a) (int)((unsigned short)(a) & 0xFF)
 #define MKDEV(a,b) ((int)((((a) & 0xff) << 8) | ((b) & 0xff)))
+#define NODEV MKDEV(0,0)
 
 #ifndef NULL
 #define NULL ((void *) 0)
@@ -103,6 +103,7 @@ extern unsigned long file_table_init(unsigned long start, unsigned long end);
 #define BLKRRPART 4703 /* re-read partition table */
 #define BLKGETSIZE 4704 /* return device size */
 #define BLKFLSBUF 4705 /* flush buffer cache */
+#define BLKRASET 4706 /* Set read ahead for block device */
 
 /* These are a few other constants  only used by scsi  devices */
 
@@ -137,6 +138,11 @@ struct buffer_head {
 	unsigned char b_dirt;		/* 0-clean,1-dirty */
 	unsigned char b_lock;		/* 0 - ok, 1 -locked */
 	unsigned char b_req;		/* 0 if the buffer has been invalidated */
+	unsigned char b_list;		/* List that this buffer appears */
+	unsigned char b_retain;         /* Expected number of times this will
+					   be used.  Put on freelist when 0 */
+	unsigned long b_flushtime;      /* Time when this (dirty) buffer should be written */
+	unsigned long b_lru_time;       /* Time when this buffer was last used. */
 	struct wait_queue * b_wait;
 	struct buffer_head * b_prev;		/* doubly linked list of hash-queue */
 	struct buffer_head * b_next;
@@ -200,19 +206,21 @@ struct inode {
 		struct nfs_inode_info nfs_i;
 		struct xiafs_inode_info xiafs_i;
 		struct sysv_inode_info sysv_i;
+		void * generic_ip;
 	} u;
 };
 
 struct file {
 	mode_t f_mode;
-	dev_t f_rdev;			/* needed for /dev/tty */
 	off_t f_pos;
 	unsigned short f_flags;
 	unsigned short f_count;
-	unsigned short f_reada;
+	off_t f_reada;
 	struct file *f_next, *f_prev;
+	int f_owner;		/* pid or -pgrp where SIGIO should be sent */
 	struct inode * f_inode;
 	struct file_operations * f_op;
+	void *private_data;	/* needed for tty driver, and maybe others */
 };
 
 struct file_lock {
@@ -225,6 +233,14 @@ struct file_lock {
 	off_t fl_start;
 	off_t fl_end;
 };
+
+struct fasync_struct {
+	int    magic;
+	struct fasync_struct	*fa_next; /* singly linked list */
+	struct file 		*fa_file;
+};
+
+#define FASYNC_MAGIC 0x4601
 
 #include <linux/minix_fs_sb.h>
 #include <linux/ext_fs_sb.h>
@@ -260,6 +276,7 @@ struct super_block {
 		struct nfs_sb_info nfs_sb;
 		struct xiafs_sb_info xiafs_sb;
 		struct sysv_sb_info sysv_sb;
+		void *generic_sbp;
 	} u;
 };
 
@@ -274,6 +291,7 @@ struct file_operations {
 	int (*open) (struct inode *, struct file *);
 	void (*release) (struct inode *, struct file *);
 	int (*fsync) (struct inode *, struct file *);
+	int (*fasync) (struct inode *, struct file *, int);
 };
 
 struct inode_operations {
@@ -309,12 +327,18 @@ struct file_system_type {
 	struct super_block *(*read_super) (struct super_block *, void *, int);
 	char *name;
 	int requires_dev;
+	struct file_system_type * next;
 };
 
 #ifdef __KERNEL__
 
+extern int register_filesystem(struct file_system_type *);
+extern int unregister_filesystem(struct file_system_type *);
+
 asmlinkage int sys_open(const char *, int, int);
 asmlinkage int sys_close(unsigned int);		/* yes, it's really unsigned */
+
+extern void kill_fasync(struct fasync_struct *fa, int sig);
 
 extern int getname(const char * filename, char **result);
 extern void putname(char * name);
@@ -352,10 +376,40 @@ extern int nr_files;
 extern struct super_block super_blocks[NR_SUPER];
 
 extern int shrink_buffers(unsigned int priority);
+extern void refile_buffer(struct buffer_head * buf);
+extern void set_writetime(struct buffer_head * buf, int flag);
+extern void refill_freelist(int size);
 
+extern struct buffer_head ** buffer_pages;
 extern int nr_buffers;
 extern int buffermem;
 extern int nr_buffer_heads;
+
+#define BUF_CLEAN 0
+#define BUF_UNSHARED 1 /* Buffers that were shared but are not any more */
+#define BUF_LOCKED 2   /* Buffers scheduled for write */
+#define BUF_LOCKED1 3  /* Supers, inodes */
+#define BUF_DIRTY 4    /* Dirty buffers, not yet scheduled for write */
+#define BUF_SHARED 5   /* Buffers shared */
+#define NR_LIST 6
+
+extern inline void mark_buffer_clean(struct buffer_head * bh)
+{
+  if(bh->b_dirt) {
+    bh->b_dirt = 0;
+    if(bh->b_list == BUF_DIRTY) refile_buffer(bh);
+  }
+}
+
+extern inline void mark_buffer_dirty(struct buffer_head * bh, int flag)
+{
+  if(!bh->b_dirt) {
+    bh->b_dirt = 1;
+    set_writetime(bh, flag);
+    if(bh->b_list != BUF_DIRTY) refile_buffer(bh);
+  }
+}
+
 
 extern void check_disk_change(dev_t dev);
 extern void invalidate_inodes(dev_t dev);
@@ -375,7 +429,6 @@ extern int open_namei(const char * pathname, int flag, int mode,
 extern int do_mknod(const char * filename, int mode, dev_t dev);
 extern void iput(struct inode * inode);
 extern struct inode * __iget(struct super_block * sb,int nr,int crsmnt);
-extern struct inode * iget(struct super_block * sb,int nr);
 extern struct inode * get_empty_inode(void);
 extern void insert_inode_hash(struct inode *);
 extern void clear_inode(struct inode *);
@@ -390,8 +443,10 @@ extern void brelse(struct buffer_head * buf);
 extern void set_blocksize(dev_t dev, int size);
 extern struct buffer_head * bread(dev_t dev, int block, int size);
 extern unsigned long bread_page(unsigned long addr,dev_t dev,int b[],int size,int prot);
-extern struct buffer_head * breada(dev_t dev,int block,...);
+extern struct buffer_head * breada(dev_t dev,int block, int size, 
+				   unsigned int pos, unsigned int filesize);
 extern void put_super(dev_t dev);
+unsigned long generate_cluster(dev_t dev, int b[], int size);
 extern dev_t ROOT_DEV;
 
 extern void show_buffers(void);
@@ -408,6 +463,11 @@ extern int generic_mmap(struct inode *, struct file *, unsigned long, size_t, in
 
 extern int block_fsync(struct inode *, struct file *);
 extern int file_fsync(struct inode *, struct file *);
+
+extern inline struct inode * iget(struct super_block * sb,int nr)
+{
+	return __iget(sb,nr,1);
+}
 
 #endif /* __KERNEL__ */
 

@@ -173,13 +173,20 @@ asmlinkage void math_emulate(long arg)
   SETUP_DATA_AREA(arg);
 
   addr_modes.vm86 = (FPU_EFLAGS & 0x00020000) != 0;
+  addr_modes.p286 = (!addr_modes.vm86
+		     && current->ldt
+		     && (current->ldt[FPU_CS >> 3].b & 0xf000) == 0xf000
+		     && (current->ldt[FPU_CS >> 3].b & (1 << 22)) == 0);
+  addr_modes.mode16 = addr_modes.vm86 | addr_modes.p286;
 
   if ( addr_modes.vm86 )
     FPU_EIP += FPU_CS << 4;
+  else if ( addr_modes.p286 )
+    FPU_EIP += LDT_BASE_ADDR(FPU_CS);
 
   FPU_ORIG_EIP = FPU_EIP;
 
-  if ( !addr_modes.vm86 )
+  if ( !addr_modes.mode16 )
     {
       /* user code space? */
       if (FPU_CS == KERNEL_CS)
@@ -239,7 +246,7 @@ do_another_FPU_instruction:
 
   RE_ENTRANT_CHECK_OFF;
   FPU_code_verify_area(1);
-  FPU_modrm = get_fs_byte((unsigned short *) FPU_EIP);
+  FPU_modrm = get_fs_byte((unsigned char *) FPU_EIP);
   RE_ENTRANT_CHECK_ON;
   FPU_EIP++;
 
@@ -279,6 +286,13 @@ do_another_FPU_instruction:
 	      }
 	  }
 
+	  FPU_EIP = FPU_ORIG_EIP;	/* Point to current FPU instruction. */
+
+	  if ( addr_modes.vm86 )
+	    FPU_EIP -= FPU_CS << 4;
+	  else if ( addr_modes.p286 )
+	    FPU_EIP -= LDT_BASE_ADDR(FPU_CS);
+
 	  RE_ENTRANT_CHECK_OFF;
 	  current->tss.trap_no = 16;
 	  current->tss.error_code = 0;
@@ -301,6 +315,7 @@ do_another_FPU_instruction:
 	get_address_16(FPU_modrm, &FPU_EIP, addr_modes);
       else
 	get_address(FPU_modrm, &FPU_EIP, addr_modes);
+
       if ( !(byte1 & 1) )
 	{
 	  unsigned short status1 = partial_status;
@@ -546,6 +561,8 @@ FPU_fwait_done:
 
   if ( addr_modes.vm86 )
     FPU_EIP -= FPU_CS << 4;
+  else if ( addr_modes.p286 )
+    FPU_EIP -= LDT_BASE_ADDR(FPU_CS);
 
   RE_ENTRANT_CHECK_OFF;
 }
@@ -561,7 +578,7 @@ static int valid_prefix(unsigned char *Byte, unsigned char **fpu_eip,
   unsigned char byte;
   unsigned char *ip = *fpu_eip;
 
-  *override = (overrides) { 0, 0, PREFIX_DS_ };       /* defaults */
+  *override = (overrides) { 0, 0, PREFIX_DEFAULT };       /* defaults */
 
   RE_ENTRANT_CHECK_OFF;
   FPU_code_verify_area(1);
@@ -595,9 +612,9 @@ static int valid_prefix(unsigned char *Byte, unsigned char **fpu_eip,
 	case PREFIX_GS:
 	  override->segment = PREFIX_GS_;
 	  goto do_next_byte;
-
-	case PREFIX_DS:   /* Redundant unless preceded by another override. */
+	case PREFIX_DS:
 	  override->segment = PREFIX_DS_;
+	  goto do_next_byte;
 
 /* lock is not a valid prefix for FPU instructions,
    let the cpu handle it to generate a SIGILL. */

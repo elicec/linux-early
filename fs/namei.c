@@ -103,7 +103,7 @@ int lookup(struct inode * dir,const char * name, int len,
 /* check permissions before traversing mount-points */
 	perm = permission(dir,MAY_EXEC);
 	if (len==2 && name[0] == '.' && name[1] == '.') {
-		if (dir == current->root) {
+		if (dir == current->fs->root) {
 			*result = dir;
 			return 0;
 		} else if ((sb = dir->i_sb) && (dir == sb->s_mounted)) {
@@ -163,12 +163,12 @@ static int dir_namei(const char * pathname, int * namelen, const char ** name,
 
 	*res_inode = NULL;
 	if (!base) {
-		base = current->pwd;
+		base = current->fs->pwd;
 		base->i_count++;
 	}
 	if ((c = *pathname) == '/') {
 		iput(base);
-		base = current->root;
+		base = current->fs->root;
 		pathname++;
 		base->i_count++;
 	}
@@ -279,7 +279,7 @@ int open_namei(const char * pathname, int flag, int mode,
 	struct inode * dir, *inode;
 	struct task_struct ** p;
 
-	mode &= S_IALLUGO & ~current->umask;
+	mode &= S_IALLUGO & ~current->fs->umask;
 	mode |= S_IFREG;
 	error = dir_namei(pathname,&namelen,&basename,base,&dir);
 	if (error)
@@ -357,7 +357,7 @@ int open_namei(const char * pathname, int flag, int mode,
  				iput(inode);
  				return -ETXTBSY;
  			}
-			for(mpnt = (*p)->mmap; mpnt; mpnt = mpnt->vm_next) {
+			for(mpnt = (*p)->mm->mmap; mpnt; mpnt = mpnt->vm_next) {
 				if (mpnt->vm_page_prot & PAGE_RW)
 					continue;
 				if (inode == mpnt->vm_inode) {
@@ -387,7 +387,7 @@ int do_mknod(const char * filename, int mode, dev_t dev)
 	int namelen, error;
 	struct inode * dir;
 
-	mode &= ~current->umask;
+	mode &= ~current->fs->umask;
 	error = dir_namei(filename,&namelen,&basename, NULL, &dir);
 	if (error)
 		return error;
@@ -407,9 +407,11 @@ int do_mknod(const char * filename, int mode, dev_t dev)
 		iput(dir);
 		return -EPERM;
 	}
+	dir->i_count++;
 	down(&dir->i_sem);
 	error = dir->i_op->mknod(dir,basename,namelen,mode,dev);
 	up(&dir->i_sem);
+	iput(dir);
 	return error;
 }
 
@@ -462,9 +464,11 @@ static int do_mkdir(const char * pathname, int mode)
 		iput(dir);
 		return -EPERM;
 	}
+	dir->i_count++;
 	down(&dir->i_sem);
 	error = dir->i_op->mkdir(dir,basename,namelen,mode);
 	up(&dir->i_sem);
+	iput(dir);
 	return error;
 }
 
@@ -588,9 +592,11 @@ static int do_symlink(const char * oldname, const char * newname)
 		iput(dir);
 		return -EPERM;
 	}
+	dir->i_count++;
 	down(&dir->i_sem);
 	error = dir->i_op->symlink(dir,basename,namelen,oldname);
 	up(&dir->i_sem);
+	iput(dir);
 	return error;
 }
 
@@ -647,9 +653,11 @@ static int do_link(struct inode * oldinode, const char * newname)
 		iput(oldinode);
 		return -EPERM;
 	}
+	dir->i_count++;
 	down(&dir->i_sem);
 	error = dir->i_op->link(oldinode, dir, basename, namelen);
 	up(&dir->i_sem);
+	iput(dir);
 	return error;
 }
 
@@ -723,10 +731,12 @@ static int do_rename(const char * oldname, const char * newname)
 		iput(new_dir);
 		return -EPERM;
 	}
+	new_dir->i_count++;
 	down(&new_dir->i_sem);
 	error = old_dir->i_op->rename(old_dir, old_base, old_len, 
 		new_dir, new_base, new_len);
 	up(&new_dir->i_sem);
+	iput(new_dir);
 	return error;
 }
 

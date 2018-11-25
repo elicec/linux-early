@@ -14,6 +14,8 @@
 	It's primary advantage is that it's able to allocate low-memory buffers.
 	A secondary advantage is that the dangerous NE*000 netcards can reserve
 	their I/O port region before the SCSI probes start.
+
+	register_netdev()/unregister_netdev() by Bjorn Ekwall <bj0rn@blox.se>
 */
 
 #include <linux/config.h>
@@ -23,9 +25,9 @@
 #include <linux/fs.h>
 #include <linux/malloc.h>
 #include <linux/if_ether.h>
-#include <memory.h>
-#include "dev.h"
-#include "eth.h"
+#include <linux/string.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
 
 /* The network devices currently exist only in the socket namespace, so these
    entries are unused.  The only ones that make sense are
@@ -38,25 +40,13 @@
 
    Given that almost all of these functions are handled in the current
    socket-based scheme, putting ethercard devices in /dev/ seems pointless.
+   
+   [Removed all support for /dev network devices. When someone adds streams then
+    by magic we get them, but otherwise they are un-needed and a space waste]
 */
 
 /* The next device number/name to assign: "eth0", "eth1", etc. */
 static int next_ethdev_number = 0;
-
-#ifdef NET_MAJOR_NUM
-static struct file_operations netcard_fops = {
-	NULL,		/* lseek */
-	NULL,		/* read */
-	NULL,		/* write */
-	NULL,		/* readdir */
-	NULL,		/* select */
-	NULL,		/* ioctl */
-	NULL,		/* mmap */
-	NULL,		/* open */
-	NULL,		/* release */
-	NULL		/* fsync */
-};
-#endif
 
 unsigned long lance_init(unsigned long mem_start, unsigned long mem_end);
 
@@ -69,16 +59,12 @@ unsigned long lance_init(unsigned long mem_start, unsigned long mem_end);
 unsigned long net_dev_init (unsigned long mem_start, unsigned long mem_end)
 {
 
-#ifdef NET_MAJOR_NUM
-	if (register_chrdev(NET_MAJOR_NUM, "network",&netcard_fops))
-		printk("WARNING: Unable to get major %d for the network devices.\n",
-			   NET_MAJOR_NUM);
-#endif
-
 #if defined(CONFIG_LANCE)			/* Note this is _not_ CONFIG_AT1500. */
 	mem_start = lance_init(mem_start, mem_end);
 #endif
-
+#if defined(CONFIG_PI)
+	mem_start = pi_init(mem_start, mem_end);
+#endif	
 	return mem_start;
 }
 
@@ -117,11 +103,9 @@ struct device *init_etherdev(struct device *dev, int sizeof_private,
 		sprintf(dev->name, "eth%d", next_ethdev_number++);
 
 	for (i = 0; i < DEV_NUMBUFFS; i++)
-		dev->buffs[i] = NULL;
+		skb_queue_head_init(&dev->buffs[i]);
 	
 	dev->hard_header	= eth_header;
-	dev->add_arp		= eth_add_arp;
-	dev->queue_xmit		= dev_queue_xmit;
 	dev->rebuild_header	= eth_rebuild_header;
 	dev->type_trans		= eth_type_trans;
 	
@@ -150,6 +134,103 @@ struct device *init_etherdev(struct device *dev, int sizeof_private,
 		dev->next = 0;
 	}
 	return dev;
+}
+
+void ether_setup(struct device *dev)
+{
+	int i;
+	/* Fill in the fields of the device structure with ethernet-generic values.
+	   This should be in a common file instead of per-driver.  */
+	for (i = 0; i < DEV_NUMBUFFS; i++)
+		skb_queue_head_init(&dev->buffs[i]);
+
+	dev->hard_header	= eth_header;
+	dev->rebuild_header = eth_rebuild_header;
+	dev->type_trans = eth_type_trans;
+
+	dev->type		= ARPHRD_ETHER;
+	dev->hard_header_len = ETH_HLEN;
+	dev->mtu		= 1500; /* eth_mtu */
+	dev->addr_len	= ETH_ALEN;
+	for (i = 0; i < ETH_ALEN; i++) {
+		dev->broadcast[i]=0xff;
+	}
+
+	/* New-style flags. */
+	dev->flags		= IFF_BROADCAST;
+	dev->family		= AF_INET;
+	dev->pa_addr	= 0;
+	dev->pa_brdaddr = 0;
+	dev->pa_mask	= 0;
+	dev->pa_alen	= sizeof(unsigned long);
+}
+
+int register_netdev(struct device *dev)
+{
+	struct device *d = dev_base;
+	unsigned long flags;
+	
+	save_flags(flags);
+	cli();
+
+	if (dev && dev->init) 
+	{
+		if (dev->init(dev) != 0)
+		{
+			restore_flags(flags);
+			return -EIO;
+		}
+		
+		if (dev->name  &&  dev->name[0] == '\0')
+			sprintf(dev->name, "eth%d", next_ethdev_number++);
+
+		/* Add device to end of chain */
+		if (dev_base) 
+		{
+			while (d->next)
+				d = d->next;
+			d->next = dev;
+		}
+		else
+			dev_base = dev;
+		dev->next = NULL;
+	}
+	restore_flags(flags);
+	return 0;
+}
+
+void unregister_netdev(struct device *dev)
+{
+	struct device *d = dev_base;
+	unsigned long flags;
+	
+	save_flags(flags);
+	cli();
+
+	printk("unregister_netdev: device ");
+	if (dev) {
+		if (dev->start)
+			printk("'%s' busy", dev->name);
+		else {
+			if (dev_base == dev)
+				dev_base = dev->next;
+			else {
+				while (d && (d->next != dev))
+					d = d->next;
+
+				if (d && (d->next == dev)) {
+					d->next = dev->next;
+					printk("'%s' unlinked", dev->name);
+				}
+				else
+					printk("'%s' not found", dev->name);
+			}
+		}
+	}
+	else
+		printk("was NULL");
+	printk("\n");
+	restore_flags(flags);
 }
 
 

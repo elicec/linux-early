@@ -64,7 +64,7 @@ int open_inode(struct inode * inode, int mode)
 	if (!f)
 		return -EMFILE;
 	fd = 0;
-	fpp = current->filp;
+	fpp = current->files->fd;
 	for (;;) {
 		if (!*fpp)
 			break;
@@ -164,8 +164,8 @@ int core_dump(long signr, struct pt_regs * regs)
 	dump.magic = CMAGIC;
 	dump.start_code = 0;
 	dump.start_stack = regs->esp & ~(PAGE_SIZE - 1);
-	dump.u_tsize = ((unsigned long) current->end_code) >> 12;
-	dump.u_dsize = ((unsigned long) (current->brk + (PAGE_SIZE-1))) >> 12;
+	dump.u_tsize = ((unsigned long) current->mm->end_code) >> 12;
+	dump.u_dsize = ((unsigned long) (current->mm->brk + (PAGE_SIZE-1))) >> 12;
 	dump.u_dsize -= dump.u_tsize;
 	dump.u_ssize = 0;
 	for(i=0; i<8; i++) dump.u_debugreg[i] = current->debugreg[i];  
@@ -244,7 +244,7 @@ asmlinkage int sys_uselib(const char * library)
 	fd = sys_open(library, 0, 0);
 	if (fd < 0)
 		return fd;
-	file = current->filp[fd];
+	file = current->files->fd[fd];
 	retval = -ENOEXEC;
 	if (file && file->f_inode && file->f_op && file->f_op->read) {
 		fmt = formats;
@@ -282,7 +282,7 @@ unsigned long * create_tables(char * p,int argc,int envc,int ibcs)
 		mpnt->vm_offset = 0;
 		mpnt->vm_ops = NULL;
 		insert_vm_struct(current, mpnt);
-		current->stk_vma = mpnt;
+		current->mm->stk_vma = mpnt;
 	}
 	sp = (unsigned long *) (0xfffffffc & (unsigned long) p);
 	sp -= envc+1;
@@ -294,19 +294,19 @@ unsigned long * create_tables(char * p,int argc,int envc,int ibcs)
 		put_fs_long((unsigned long)argv,--sp);
 	}
 	put_fs_long((unsigned long)argc,--sp);
-	current->arg_start = (unsigned long) p;
+	current->mm->arg_start = (unsigned long) p;
 	while (argc-->0) {
 		put_fs_long((unsigned long) p,argv++);
 		while (get_fs_byte(p++)) /* nothing */ ;
 	}
 	put_fs_long(0,argv);
-	current->arg_end = current->env_start = (unsigned long) p;
+	current->mm->arg_end = current->mm->env_start = (unsigned long) p;
 	while (envc-->0) {
 		put_fs_long((unsigned long) p,envp++);
 		while (get_fs_byte(p++)) /* nothing */ ;
 	}
 	put_fs_long(0,envp);
-	current->env_end = (unsigned long) p;
+	current->mm->env_end = (unsigned long) p;
 	return sp;
 }
 
@@ -400,12 +400,12 @@ unsigned long change_ldt(unsigned long text_size,unsigned long * page)
 	code_limit = TASK_SIZE;
 	data_limit = TASK_SIZE;
 	code_base = data_base = 0;
-	current->start_code = code_base;
+	current->mm->start_code = code_base;
 	data_base += data_limit;
 	for (i=MAX_ARG_PAGES-1 ; i>=0 ; i--) {
 		data_base -= PAGE_SIZE;
 		if (page[i]) {
-			current->rss++;
+			current->mm->rss++;
 			put_dirty_page(current,page[i],data_base);
 		}
 	}
@@ -486,9 +486,9 @@ void flush_old_exec(struct linux_binprm * bprm)
 	}
 	/* Release all of the old mmap stuff. */
 
-	mpnt = current->mmap;
-	current->mmap = NULL;
-	current->stk_vma = NULL;
+	mpnt = current->mm->mmap;
+	current->mm->mmap = NULL;
+	current->mm->stk_vma = NULL;
 	while (mpnt) {
 		mpnt1 = mpnt->vm_next;
 		if (mpnt->vm_ops && mpnt->vm_ops->close)
@@ -523,9 +523,9 @@ void flush_old_exec(struct linux_binprm * bprm)
 			current->sigaction[i].sa_handler = NULL;
 	}
 	for (i=0 ; i<NR_OPEN ; i++)
-		if (FD_ISSET(i,&current->close_on_exec))
+		if (FD_ISSET(i,&current->files->close_on_exec))
 			sys_close(i);
-	FD_ZERO(&current->close_on_exec);
+	FD_ZERO(&current->files->close_on_exec);
 	clear_page_tables(current);
 	if (last_task_used_math == current)
 		last_task_used_math = NULL;
@@ -754,6 +754,17 @@ struct linux_binfmt formats[] = {
 	{NULL, NULL}
 };
 
+static void set_brk(unsigned long start, unsigned long end)
+{
+	start = PAGE_ALIGN(start);
+	end = PAGE_ALIGN(end);
+	if (end <= start)
+		return;
+	do_mmap(NULL, start, end - start,
+		PROT_READ | PROT_WRITE | PROT_EXEC,
+		MAP_FIXED | MAP_PRIVATE, 0);
+}
+
 /*
  * These are the functions used to load a.out style executables and shared
  * libraries.  There is no binary dependent code anywhere else.
@@ -788,14 +799,15 @@ int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	/* OK, This is the point of no return */
 	flush_old_exec(bprm);
 
-	current->end_code = N_TXTADDR(ex) + ex.a_text;
-	current->end_data = ex.a_data + current->end_code;
-	current->start_brk = current->brk = current->end_data;
-	current->start_code += N_TXTADDR(ex);
-	current->rss = 0;
-	current->suid = current->euid = bprm->e_uid;
-	current->mmap = NULL;
+	current->mm->brk = ex.a_bss +
+		(current->mm->start_brk =
+		(current->mm->end_data = ex.a_data +
+		(current->mm->end_code = ex.a_text +
+		(current->mm->start_code = N_TXTADDR(ex)))));
+	current->mm->rss = 0;
+	current->mm->mmap = NULL;
 	current->executable = NULL;  /* for OMAGIC files */
+	current->suid = current->euid = bprm->e_uid;
 	current->sgid = current->egid = bprm->e_gid;
 	if (N_MAGIC(ex) == OMAGIC) {
 		do_mmap(NULL, 0, ex.a_text+ex.a_data,
@@ -810,7 +822,7 @@ int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 		
 		if (fd < 0)
 			return fd;
-		file = current->filp[fd];
+		file = current->files->fd[fd];
 		if (!file->f_op || !file->f_op->mmap) {
 			sys_close(fd);
 			do_mmap(NULL, 0, ex.a_text+ex.a_data,
@@ -842,12 +854,12 @@ int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 		bprm->inode->i_count++;
 	}
 beyond_if:
-	sys_brk(current->brk+ex.a_bss);
+	set_brk(current->mm->start_brk, current->mm->brk);
 	
 	p += change_ldt(ex.a_text,bprm->page);
 	p -= MAX_ARG_PAGES*PAGE_SIZE;
 	p = (unsigned long) create_tables((char *)p,bprm->argc,bprm->envc,0);
-	current->start_stack = p;
+	current->mm->start_stack = p;
 	regs->eip = ex.a_entry;		/* eip, magic happens :-) */
 	regs->esp = p;			/* stack pointer */
 	if (current->flags & PF_PTRACED)
@@ -866,7 +878,7 @@ int load_aout_library(int fd)
 	unsigned int start_addr;
 	int error;
 	
-	file = current->filp[fd];
+	file = current->files->fd[fd];
 	inode = file->f_inode;
 	
 	set_fs(KERNEL_DS);

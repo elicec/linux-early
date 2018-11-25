@@ -17,6 +17,8 @@
  *
  * Fixes:
  *		Dmitry Gorodchanin	:	/proc locking fix
+ *		Mathijs Maassen		:	unbound /proc fix.
+ *		Alan Cox		:	Fix sock=NULL race
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -28,51 +30,71 @@
 #include <linux/string.h>
 #include <linux/socket.h>
 #include <linux/net.h>
-#include <linux/ddi.h>
 #include <linux/un.h>
 #include <linux/param.h>
 #include "unix.h"
 
 
 /* Called from PROCfs. */
-int unix_get_info(char *buffer)
+int unix_get_info(char *buffer, char **start, off_t offset, int length)
 {
-  char *pos;
-  int i;
+  	off_t pos=0;
+  	off_t begin=0;
+  	int len=0;
+  	int i;
+  	unsigned long flags;
+	socket_state s_state;
+	short s_type;
+	long s_flags;
+	
+  	len += sprintf(buffer, "Num RefCount Protocol Flags    Type St Path\n");
 
-  pos = buffer;
-  pos += sprintf(pos, "Num RefCount Protocol Flags    Type St Path\n");
+  	for(i = 0; i < NSOCKETS; i++) 
+  	{
+  		save_flags(flags);
+  		cli();
+		if (unix_datas[i].refcnt>0 && unix_datas[i].socket!=NULL)
+		{
+			/* sprintf is slow... lock only for the variable reads */
+			s_type=unix_datas[i].socket->type;
+			s_flags=unix_datas[i].socket->flags;
+			s_state=unix_datas[i].socket->state;
+			restore_flags(flags);
+			len += sprintf(buffer+len, "%2d: %08X %08X %08lX %04X %02X", i,
+				unix_datas[i].refcnt,
+				unix_datas[i].protocol,
+				s_flags,
+				s_type,
+				s_state
+			);
 
-  for(i = 0; i < NSOCKETS; i++) {
-	if (unix_datas[i].refcnt>0) {
-		pos += sprintf(pos, "%2d: %08X %08X %08lX %04X %02X", i,
-			unix_datas[i].refcnt,
-			unix_datas[i].protocol,
-			unix_datas[i].socket->flags,
-			unix_datas[i].socket->type,
-			unix_datas[i].socket->state
-		);
-
-		/* If socket is bound to a filename, we'll print it. */
-		if(unix_datas[i].sockaddr_len>0) {
-			pos += sprintf(pos, " %s\n",
+			/* If socket is bound to a filename, we'll print it. */
+			if(unix_datas[i].sockaddr_len>0) 
+			{
+				len += sprintf(buffer+len, " %s\n",
 				unix_datas[i].sockaddr_un.sun_path);
-		} else { /* just add a newline */
-			*pos='\n';
-			pos++;
-			*pos='\0';
+			} 
+			else 
+			{ /* just add a newline */
+				buffer[len++]='\n';
+			}
+			
+			pos=begin+len;
+			if(pos<offset)
+			{
+				len=0;
+				begin=pos;
+			}
+			if(pos>offset+length)
+				break;
 		}
-
-		/*
-		 * Check whether buffer _may_ overflow in the next loop.
-		 * Since sockets may have very very long paths, we make
-		 * PATH_MAX+80 the minimum space left for a new line.
-		 */
-		if (pos > buffer+PAGE_SIZE-80-PATH_MAX) {
-			printk("UNIX: netinfo: oops, too many sockets.\n");
-			return(pos - buffer);
-		}
+		else
+			restore_flags(flags);
 	}
-  }
-  return(pos - buffer);
+	
+	*start=buffer+(offset-begin);
+	len-=(offset-begin);
+	if(len>length)
+		len=length;
+	return len;
 }

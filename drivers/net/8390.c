@@ -47,14 +47,9 @@ static char *version =
 #include <linux/in.h>
 #include <linux/interrupt.h>
 
-#include "dev.h"
-#include "eth.h"
-#include "ip.h"
-#include "protocol.h"
-#include "tcp.h"
-#include "skbuff.h"
-#include "sock.h"
-#include "arp.h"
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+#include <linux/skbuff.h>
 
 #include "8390.h"
 
@@ -145,15 +140,16 @@ static int ei_start_xmit(struct sk_buff *skb, struct device *dev)
 			return 1;
 		}
 		isr = inb(e8390_base+EN0_ISR);
-		printk("%s: transmit timed out, TX status %#2x, ISR %#2x.\n",
+		printk(KERN_DEBUG "%s: transmit timed out, TX status %#2x, ISR %#2x.\n",
 			   dev->name, txsr, isr);
 		/* Does the 8390 thinks it has posted an interrupt? */
 		if (isr)
-			printk("%s: Possible IRQ conflict on IRQ%d?\n", dev->name, dev->irq);
+			printk(KERN_DEBUG "%s: Possible IRQ conflict on IRQ%d?\n", dev->name, dev->irq);
 		else {
 			/* The 8390 probably hasn't gotten on the cable yet. */
-			printk("%s: Possible network cable problem?\n", dev->name);
-			ei_local->interface_num ^= 1; 	/* Try a different xcvr.  */
+			printk(KERN_DEBUG "%s: Possible network cable problem?\n", dev->name);
+			if(ei_local->stat.tx_packets==0)
+				ei_local->interface_num ^= 1; 	/* Try a different xcvr.  */
 		}
 		/* Try to restart the card.  Perhaps the user has fixed something. */
 		ei_reset_8390(dev);
@@ -168,13 +164,6 @@ static int ei_start_xmit(struct sk_buff *skb, struct device *dev)
 		dev_tint(dev);
 		return 0;
     }
-    /* Fill in the ethernet header. */
-    if (!skb->arp  &&  dev->rebuild_header(skb->data, dev)) {
-		skb->dev = dev;
-		arp_queue (skb);
-		return 0;
-    }
-    skb->arp=1;
     
     length = skb->len;
     if (skb->len <= 0)
@@ -285,7 +274,7 @@ void ei_interrupt(int reg_ptr)
     
     /* !!Assumption!! -- we stay in page 0.	 Don't break this. */
     while ((interrupts = inb_p(e8390_base + EN0_ISR)) != 0
-		   && ++boguscount < 5) {
+		   && ++boguscount < 9) {
 		if (interrupts & ENISR_RDC) {
 			/* Ack meaningless DMA complete. */
 			outb_p(ENISR_RDC, e8390_base + EN0_ISR);
@@ -384,7 +373,7 @@ static void ei_tx_intr(struct device *dev)
 		if (status & ENTSR_OWC) ei_local->stat.tx_window_errors++;
 	}
     
-    mark_bh (INET_BH);
+    mark_bh (NET_BH);
 }
 
 /* We have a good packet(s), get it/them out of the buffers. */
@@ -448,19 +437,16 @@ static void ei_receive(struct device *dev)
 					   rx_frame.next);
 			ei_local->stat.rx_errors++;
 		} else if ((rx_frame.status & 0x0F) == ENRSR_RXOK) {
-			int sksize = sizeof(struct sk_buff) + pkt_len;
 			struct sk_buff *skb;
 			
-			skb = alloc_skb(sksize, GFP_ATOMIC);
+			skb = alloc_skb(pkt_len, GFP_ATOMIC);
 			if (skb == NULL) {
-				if (ei_debug)
+				if (ei_debug > 1)
 					printk("%s: Couldn't allocate a sk_buff of size %d.\n",
-						   dev->name, sksize);
+						   dev->name, pkt_len);
 				ei_local->stat.rx_dropped++;
 				break;
 			} else {
-				skb->mem_len = sksize;
-				skb->mem_addr = skb;
 				skb->len = pkt_len;
 				skb->dev = dev;
 				
@@ -490,7 +476,7 @@ static void ei_receive(struct device *dev)
 		outb(next_frame-1, e8390_base+EN0_BOUNDARY);
     }
     /* If any worth-while packets have been received, dev_rint()
-       has done a mark_bh(INET_BH) for us and will work on them
+       has done a mark_bh(NET_BH) for us and will work on them
        when we get to the bottom-half routine. */
 
 	/* Record the maximum Rx packet queue. */
@@ -513,7 +499,7 @@ static void ei_rx_overrun(struct device *dev)
     /* We should already be stopped and in page0.  Remove after testing. */
     outb_p(E8390_NODMA+E8390_PAGE0+E8390_STOP, e8390_base+E8390_CMD);
     
-    if (ei_debug)
+    if (ei_debug > 1)
 		printk("%s: Receiver overrun.\n", dev->name);
     ei_local->stat.rx_over_errors++;
     
@@ -579,8 +565,6 @@ static void set_multicast_list(struct device *dev, int num_addrs, void *addrs)
 /* Initialize the rest of the 8390 device structure. */
 int ethdev_init(struct device *dev)
 {
-    int i;
-    
     if (ei_debug > 1)
 		printk(version);
     
@@ -604,32 +588,9 @@ int ethdev_init(struct device *dev)
 #ifdef HAVE_MULTICAST
     dev->set_multicast_list = &set_multicast_list;
 #endif
-    
-    for (i = 0; i < DEV_NUMBUFFS; i++)
-		dev->buffs[i] = NULL;
-    
-    dev->hard_header	= eth_header;
-    dev->add_arp		= eth_add_arp;
-    dev->queue_xmit		= dev_queue_xmit;
-    dev->rebuild_header	= eth_rebuild_header;
-    dev->type_trans		= eth_type_trans;
-    
-    dev->type		= ARPHRD_ETHER;
-    dev->hard_header_len = ETH_HLEN;
-    dev->mtu		= 1500; /* eth_mtu */
-    dev->addr_len	= ETH_ALEN;
-    for (i = 0; i < ETH_ALEN; i++) {
-		dev->broadcast[i]=0xff;
-    }
-    
-    /* New-style flags. */
-    dev->flags		= IFF_BROADCAST;
-    dev->family		= AF_INET;
-    dev->pa_addr	= 0;
-    dev->pa_brdaddr	= 0;
-    dev->pa_mask	= 0;
-    dev->pa_alen	= sizeof(unsigned long);
-    
+
+    ether_setup(dev);
+        
     return 0;
 }
 

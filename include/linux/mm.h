@@ -73,22 +73,50 @@ extern unsigned long __zero_page(void);
 #define BAD_PAGE __bad_page()
 #define ZERO_PAGE __zero_page()
 
-extern volatile short free_page_ptr; /* used by malloc and tcp/ip. */
+/* planning stage.. */
+#define P_DIRTY		0x0001
+#define P_LOCKED	0x0002
+#define P_UPTODATE	0x0004
+#define P_RESERVED	0x8000
+
+struct page_info {
+	unsigned short flags;
+	unsigned short count;
+	struct inode * inode;
+	unsigned long offset;
+	struct page_info * next_same_inode;
+	struct page_info * prev_same_inode;
+	struct page_info * next_hash;
+	struct page_info * prev_hash;
+	struct wait_queue *wait;
+};
+/* end of planning stage */
+
+/*
+ * Free area management
+ */
 
 extern int nr_swap_pages;
 extern int nr_free_pages;
-extern unsigned long free_page_list;
-extern int nr_secondary_pages;
-extern unsigned long secondary_page_list;
 
 #define MAX_SECONDARY_PAGES 20
+#define NR_MEM_LISTS 6
+
+struct mem_list {
+	struct mem_list * next;
+	struct mem_list * prev;
+};
+
+extern struct mem_list free_area_list[NR_MEM_LISTS];
+extern unsigned char * free_area_map[NR_MEM_LISTS];
 
 /*
  * This is timing-critical - most of the time in getting a new page
  * goes to clearing the page. If you want a page without the clearing
  * overhead, just use __get_free_page() directly..
  */
-extern unsigned long __get_free_page(int priority);
+#define __get_free_page(priority) __get_free_pages((priority),0)
+extern unsigned long __get_free_pages(int priority, unsigned long gfporder);
 extern inline unsigned long get_free_page(int priority)
 {
 	unsigned long page;
@@ -102,9 +130,12 @@ extern inline unsigned long get_free_page(int priority)
 	return page;
 }
 
-/* memory.c */
+/* memory.c & swap.c*/
 
-extern void free_page(unsigned long addr);
+#define free_page(addr) free_pages((addr),0)
+extern void free_pages(unsigned long addr, unsigned long order);
+
+extern void show_free_areas(void);
 extern unsigned long put_dirty_page(struct task_struct * tsk,unsigned long page,
 	unsigned long address);
 extern void free_page_tables(struct task_struct * tsk);
@@ -186,10 +217,11 @@ extern unsigned short * mem_map;
 #define GFP_ATOMIC	0x01
 #define GFP_USER	0x02
 #define GFP_KERNEL	0x03
+#define GFP_NOBUFFER	0x04
 
 
 /* vm_ops not present page codes */
-#define SHM_SWP_TYPE 0x41        
+#define SHM_SWP_TYPE 0x41
 extern void shm_no_page (ulong *);
 
 #endif

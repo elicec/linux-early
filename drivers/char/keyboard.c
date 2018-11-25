@@ -14,10 +14,11 @@
 #define KEYBOARD_IRQ 1
 
 #include <linux/sched.h>
+#include <linux/interrupt.h>
 #include <linux/tty.h>
+#include <linux/tty_flip.h>
 #include <linux/mm.h>
 #include <linux/ptrace.h>
-#include <linux/interrupt.h>
 #include <linux/config.h>
 #include <linux/signal.h>
 #include <linux/string.h>
@@ -26,6 +27,7 @@
 
 #include "kbd_kern.h"
 #include "diacr.h"
+#include "vt_kern.h"
 
 #define SIZE(x) (sizeof(x)/sizeof((x)[0]))
 
@@ -59,7 +61,7 @@
 #include <asm/io.h>
 #include <asm/system.h>
 
-extern void do_keyboard_interrupt(void);
+extern void poke_blanked_console(void);
 extern void ctrl_alt_del(void);
 extern void change_console(unsigned int new_console);
 extern void scrollback(int);
@@ -85,10 +87,11 @@ static int want_console = -1;
 static int last_console = 0;		/* last used VC */
 static int dead_key_next = 0;
 static int shift_state = 0;
-static int npadch = -1;		        /* -1 or number assembled on pad */
+static int npadch = -1;			/* -1 or number assembled on pad */
 static unsigned char diacr = 0;
 static char rep = 0;			/* flag telling character repeat */
 struct kbd_struct kbd_table[NR_CONSOLES];
+static struct tty_struct **ttytab;
 static struct kbd_struct * kbd = kbd_table;
 static struct tty_struct * tty = NULL;
 
@@ -100,7 +103,7 @@ typedef void (*k_hand)(unsigned char value, char up_flag);
 typedef void (k_handfn)(unsigned char value, char up_flag);
 
 static k_handfn
-        do_self, do_fn, do_spec, do_pad, do_dead, do_cons, do_cur, do_shift,
+	do_self, do_fn, do_spec, do_pad, do_dead, do_cons, do_cur, do_shift,
 	do_meta, do_ascii, do_lock, do_lowercase;
 
 static k_hand key_handler[] = {
@@ -110,7 +113,7 @@ static k_hand key_handler[] = {
 
 /* maximum values each key_handler can handle */
 const int max_vals[] = {
-	255, NR_FUNC - 1, 14, 17, 4, 255, 3, NR_SHIFT,
+	255, NR_FUNC - 1, 15, 17, 4, 255, 3, NR_SHIFT,
 	255, 9, 3, 255
 };
 
@@ -118,11 +121,10 @@ const int NR_TYPES = SIZE(max_vals);
 
 static void put_queue(int);
 static unsigned char handle_diacr(unsigned char);
+static void SAK(void);
 
 /* pt_regs - set by keyboard_interrupt(), used by show_ptregs() */
 static struct pt_regs * pt_regs;
-
-static int got_break = 0;
 
 static inline void kb_wait(void)
 {
@@ -196,7 +198,7 @@ static void keyboard_interrupt(int int_pt_regs)
 {
 	unsigned char scancode;
 	static unsigned int prev_scancode = 0;   /* remember E0, E1 */
-	char up_flag;		                 /* 0 or 0200 */
+	char up_flag;				 /* 0 or 0200 */
 	char raw_mode;
 
 	pt_regs = (struct pt_regs *) int_pt_regs;
@@ -214,17 +216,17 @@ static void keyboard_interrupt(int int_pt_regs)
 		goto end_kbd_intr;
 	} else if (scancode == 0) {
 #ifdef KBD_REPORT_ERR
-	        printk("keyboard buffer overflow\n");
+		printk("keyboard buffer overflow\n");
 #endif
 		goto end_kbd_intr;
 	} else if (scancode == 0xff) {
 #ifdef KBD_REPORT_ERR
-	        printk("keyboard error\n");
+		printk("keyboard error\n");
 #endif
-	        prev_scancode = 0;
-	        goto end_kbd_intr;
+		prev_scancode = 0;
+		goto end_kbd_intr;
 	}
-	tty = TTY_TABLE(0);
+	tty = ttytab[fg_console];
  	kbd = kbd_table + fg_console;
 	if ((raw_mode = vc_kbd_mode(kbd,VC_RAW))) {
  		put_queue(scancode);
@@ -242,7 +244,7 @@ static void keyboard_interrupt(int int_pt_regs)
  	 */
 	up_flag = (scancode & 0200);
  	scancode &= 0x7f;
-  
+
 	if (prev_scancode) {
 	  /*
 	   * usually it will be 0xe0, but a Pause key generates
@@ -294,7 +296,7 @@ static void keyboard_interrupt(int int_pt_regs)
 #endif
 	  goto end_kbd_intr;
  	}
-  
+
 	/*
 	 * At this point the variable `scancode' contains the keysym.
 	 * We keep track of the up/down status of the key, and
@@ -308,15 +310,15 @@ static void keyboard_interrupt(int int_pt_regs)
 		rep = 0;
 	} else
  		rep = set_bit(scancode, key_down);
-  
+
 	if (raw_mode)
-	        goto end_kbd_intr;
+		goto end_kbd_intr;
 
  	if (vc_kbd_mode(kbd, VC_MEDIUMRAW)) {
  		put_queue(scancode + up_flag);
 		goto end_kbd_intr;
  	}
-  
+
  	/*
 	 * Small change in philosophy: earlier we defined repetition by
 	 *	 rep = scancode == prev_keysym;
@@ -330,10 +332,9 @@ static void keyboard_interrupt(int int_pt_regs)
  	 *  characters get echoed locally. This makes key repeat usable
  	 *  with slow applications and under heavy loads.
 	 */
-	if (!rep || 
+	if (!rep ||
 	    (vc_kbd_mode(kbd,VC_REPEAT) && tty &&
-	     (L_ECHO(tty) || (EMPTY(&tty->secondary) && EMPTY(&tty->read_q)))))
-	{
+	     (L_ECHO(tty) || (tty->driver.chars_in_buffer(tty) == 0)))) {
 		u_short key_code;
 		u_char type;
 
@@ -357,36 +358,24 @@ end_kbd_intr:
 
 static void put_queue(int ch)
 {
-	struct tty_queue *qp;
-
 	wake_up(&keypress_wait);
-	if (!tty)
-		return;
-	qp = &tty->read_q;
-
-	if (LEFT(qp)) {
-		qp->buf[qp->head] = ch;
-		INC(qp->head);
+	if (tty) {
+		tty_insert_flip_char(tty, ch, 0);
+		tty_schedule_flip(tty);
 	}
 }
 
 static void puts_queue(char *cp)
 {
-	struct tty_queue *qp;
-	char ch;
-
-	/* why interruptible here, plain wake_up above? */
-	wake_up_interruptible(&keypress_wait);
+	wake_up(&keypress_wait);
 	if (!tty)
 		return;
-	qp = &tty->read_q;
 
-	while ((ch = *(cp++)) != 0) {
-		if (LEFT(qp)) {
-			qp->buf[qp->head] = ch;
-			INC(qp->head);
-		}
+	while (*cp) {
+		tty_insert_flip_char(tty, *cp, 0);
+		cp++;
 	}
+	tty_schedule_flip(tty);
 }
 
 static void applkey(int key, char mode)
@@ -479,7 +468,9 @@ static void lastcons(void)
 
 static void send_intr(void)
 {
-	got_break = 1;
+	if (tty->termios && I_IGNBRK(tty))
+		return;
+	tty_insert_flip_char(tty, 0, TTY_BREAK);
 }
 
 static void scrll_forw(void)
@@ -499,7 +490,34 @@ static void boot_it(void)
 
 static void compose(void)
 {
-        dead_key_next = 1;
+	dead_key_next = 1;
+}
+
+static void SAK(void)
+{
+	do_SAK(tty);
+#if 0
+	/*
+	 * Need to fix SAK handling to fix up RAW/MEDIUM_RAW and
+	 * vt_cons modes before we can enable RAW/MEDIUM_RAW SAK
+	 * handling.
+	 * 
+	 * We should do this some day --- the whole point of a secure
+	 * attention key is that it should be guaranteed to always
+	 * work.
+	 */
+	clr_vc_kbd_flag(kbd, VC_RAW);
+	clr_vc_kbd_flag(kbd, VC_MEDIUMRAW);
+	vt_cons[fg_console].vc_mode = KD_TEXT;
+	vt_cons[fg_console].vt_mode.mode = VT_AUTO;
+	vt_cons[fg_console].vt_mode.waitv = 0;
+	vt_cons[fg_console].vt_mode.relsig = 0;
+	vt_cons[fg_console].vt_mode.acqsig = 0;
+	vt_cons[fg_console].vt_mode.frsig = 0;
+	vt_cons[fg_console].vt_pid = -1;
+	vt_cons[fg_console].vt_newvt = -1;
+	unblank_screen();
+#endif
 }
 
 static void do_spec(unsigned char value, char up_flag)
@@ -509,7 +527,7 @@ static void do_spec(unsigned char value, char up_flag)
 		NULL,		enter,		show_ptregs,	show_mem,
 		show_state,	send_intr,	lastcons,	caps_toggle,
 		num,		hold,		scrll_forw,	scrll_back,
-		boot_it,	caps_on,        compose
+		boot_it,	caps_on,        compose,        SAK
 	};
 
 	if (up_flag)
@@ -523,22 +541,22 @@ static void do_spec(unsigned char value, char up_flag)
 
 static void do_lowercase(unsigned char value, char up_flag)
 {
-        printk("keyboard.c: do_lowercase was called - impossible\n");
+	printk("keyboard.c: do_lowercase was called - impossible\n");
 }
-  
+
 static void do_self(unsigned char value, char up_flag)
 {
 	if (up_flag)
 		return;		/* no action, if this is a key release */
 
-        if (diacr)
-                value = handle_diacr(value);
+	if (diacr)
+		value = handle_diacr(value);
 
-        if (dead_key_next) {
-                dead_key_next = 0;
-                diacr = value;
-                return;
-        }
+	if (dead_key_next) {
+		dead_key_next = 0;
+		diacr = value;
+		return;
+	}
 
 	put_queue(value);
 }
@@ -549,7 +567,7 @@ static void do_self(unsigned char value, char up_flag)
 #define A_TILDE  '~'
 #define A_DIAER  '"'
 static unsigned char ret_diacr[] =
-        {A_GRAVE, A_ACUTE, A_CFLEX, A_TILDE, A_DIAER };
+	{A_GRAVE, A_ACUTE, A_CFLEX, A_TILDE, A_DIAER };
 
 /* If a dead key pressed twice, output a character corresponding to it,	*/
 /* otherwise just remember the dead key.				*/
@@ -559,12 +577,12 @@ static void do_dead(unsigned char value, char up_flag)
 	if (up_flag)
 		return;
 
-        value = ret_diacr[value];
-        if (diacr == value) {   /* pressed twice */
-                diacr = 0;
-                put_queue(value);
-                return;
-        }
+	value = ret_diacr[value];
+	if (diacr == value) {   /* pressed twice */
+		diacr = 0;
+		put_queue(value);
+		return;
+	}
 	diacr = value;
 }
 
@@ -574,19 +592,20 @@ static void do_dead(unsigned char value, char up_flag)
 
 unsigned char handle_diacr(unsigned char ch)
 {
-        int d = diacr;
-        int i;
+	int d = diacr;
+	int i;
 
-        diacr = 0;
-        if (ch == ' ')
-                return d;
+	diacr = 0;
+	if (ch == ' ')
+		return d;
 
-        for (i = 0; i < accent_table_size; i++)
-          if(accent_table[i].diacr == d && accent_table[i].base == ch)
-            return accent_table[i].result;
+	for (i = 0; i < accent_table_size; i++) {
+		if (accent_table[i].diacr == d && accent_table[i].base == ch)
+			return accent_table[i].result;
+	}
 
-        put_queue(d);
-        return ch;
+	put_queue(d);
+	return ch;
 }
 
 static void do_cons(unsigned char value, char up_flag)
@@ -601,9 +620,9 @@ static void do_fn(unsigned char value, char up_flag)
 	if (up_flag)
 		return;
 	if (value < SIZE(func_table))
-	        puts_queue(func_table[value]);
+		puts_queue(func_table[value]);
 	else
-	        printk("do_fn called with value=%d\n", value);
+		printk("do_fn called with value=%d\n", value);
 }
 
 static void do_pad(unsigned char value, char up_flag)
@@ -682,11 +701,12 @@ static void do_shift(unsigned char value, char up_flag)
 	/* kludge... */
 	if (value == KVAL(K_CAPSSHIFT)) {
 		value = KVAL(K_SHIFT);
-		clr_vc_kbd_led(kbd, VC_CAPSLOCK);
+		if (!up_flag)
+			clr_vc_kbd_led(kbd, VC_CAPSLOCK);
 	}
 
 	if (up_flag) {
-	        /* handle the case that two shift or control
+		/* handle the case that two shift or control
 		   keys are depressed simultaneously */
 		if (k_down[value])
 			k_down[value]--;
@@ -709,9 +729,9 @@ static void do_shift(unsigned char value, char up_flag)
    recompute k_down[] and shift_state from key_down[] */
 void compute_shiftstate(void)
 {
-        int i, j, k, sym, val;
+	int i, j, k, sym, val;
 
-        shift_state = 0;
+	shift_state = 0;
 	for(i=0; i < SIZE(k_down); i++)
 	  k_down[i] = 0;
 
@@ -725,7 +745,7 @@ void compute_shiftstate(void)
 		  val = KVAL(sym);
 		  k_down[val]++;
 		  shift_state |= (1<<val);
-	        }
+		}
 	      }
 	  }
 }
@@ -748,9 +768,9 @@ static void do_ascii(unsigned char value, char up_flag)
 		return;
 
 	if (npadch == -1)
-	        npadch = value;
+		npadch = value;
 	else
-	        npadch = (npadch * 10 + value) % 1000;
+		npadch = (npadch * 10 + value) % 1000;
 }
 
 static void do_lock(unsigned char value, char up_flag)
@@ -818,27 +838,7 @@ static void kbd_bh(void * unused)
 		}
 		want_console = -1;
 	}
-	if (got_break) {
-		if (tty && !I_IGNBRK(tty)) {
-			if (I_BRKINT(tty)) {
-				flush_input(tty);
-				flush_output(tty);
-				if (tty->pgrp > 0)
-					kill_pg(tty->pgrp, SIGINT, 1);
-			} else {
-				cli();
-				if (LEFT(&tty->read_q) >= 2) {
-					set_bit(tty->read_q.head,
-						&tty->readq_flags);
-					put_queue(TTY_BREAK);
-					put_queue(0);
-				}
-				sti();
-			}
-		}
-		got_break = 0;
-	}
-	do_keyboard_interrupt();
+	poke_blanked_console();
 	cli();
 	if ((inb_p(0x64) & kbd_read_mask) == 0x01)
 		fake_keyboard_interrupt();
@@ -876,6 +876,7 @@ unsigned long kbd_init(unsigned long kmem_start)
 {
 	int i;
 	struct kbd_struct * kbd;
+	extern struct tty_driver console_driver;
 
 	kbd = kbd_table + 0;
 	for (i = 0 ; i < NR_CONSOLES ; i++,kbd++) {
@@ -884,6 +885,7 @@ unsigned long kbd_init(unsigned long kmem_start)
 		kbd->lockstate = KBD_DEFLOCK;
 		kbd->modeflags = KBD_DEFMODE;
 	}
+	ttytab = console_driver.table;
 
 	bh_base[KEYBOARD_BH].routine = kbd_bh;
 	request_irq(KEYBOARD_IRQ,keyboard_interrupt);

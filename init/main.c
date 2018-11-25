@@ -47,7 +47,7 @@ struct desc_struct default_ldt;
 static inline _syscall0(int,idle)
 static inline _syscall0(int,fork)
 static inline _syscall0(int,pause)
-static inline _syscall1(int,setup,void *,BIOS)
+static inline _syscall0(int,setup)
 static inline _syscall0(int,sync)
 static inline _syscall0(pid_t,setsid)
 static inline _syscall3(int,write,int,fd,const char *,buf,off_t,count)
@@ -78,13 +78,13 @@ extern void floppy_init(void);
 extern void sock_init(void);
 extern long rd_init(long mem_start, int length);
 unsigned long net_dev_init(unsigned long, unsigned long);
-extern unsigned long simple_strtoul(const char *,char **,unsigned int);
 
 extern void hd_setup(char *str, int *ints);
 extern void bmouse_setup(char *str, int *ints);
 extern void eth_setup(char *str, int *ints);
 extern void xd_setup(char *str, int *ints);
 extern void mcd_setup(char *str, int *ints);
+extern void st_setup(char *str, int *ints);
 extern void st0x_setup(char *str, int *ints);
 extern void tmc8xx_setup(char *str, int *ints);
 extern void t128_setup(char *str, int *ints);
@@ -120,6 +120,7 @@ extern unsigned long scsi_dev_init(unsigned long, unsigned long);
 #define MAX_INIT_ARGS 8
 #define MAX_INIT_ENVS 8
 #define COMMAND_LINE ((char *) (PARAM+2048))
+#define COMMAND_LINE_SIZE 256
 
 extern void time_init(void);
 
@@ -149,7 +150,7 @@ int root_mountflags = 0;
 
 static char fpu_error = 0;
 
-static char command_line[80] = { 0, };
+static char command_line[COMMAND_LINE_SIZE] = { 0, };
 
 char *get_options(char *str, int *ints) 
 {
@@ -175,6 +176,9 @@ struct {
 #endif
 #ifdef CONFIG_BLK_DEV_HD
 	{ "hd=", hd_setup },
+#endif
+#ifdef CONFIG_CHR_DEV_ST
+	{ "st=", st_setup },
 #endif
 #ifdef CONFIG_BUSMOUSE
 	{ "bmouse=", bmouse_setup },
@@ -266,7 +270,7 @@ static void parse_options(char *line)
 {
 	char *next;
 	char *devnames[] = { "hda", "hdb", "sda", "sdb", "sdc", "sdd", "sde", "fd", "xda", "xdb", NULL };
-	int devnums[]    = { 0x300, 0x340, 0x800, 0x810, 0x820, 0x830, 0x840, 0x200, 0xC00, 0xC40, 0};
+	int devnums[]    = { 0x300, 0x340, 0x800, 0x810, 0x820, 0x830, 0x840, 0x200, 0xD00, 0xD40, 0};
 	int args, envs;
 
 	if (!*line)
@@ -329,12 +333,19 @@ static void parse_options(char *line)
 static void copy_options(char * to, char * from)
 {
 	char c = ' ';
+	int len = 0;
 
-	do {
-		if (c == ' ' && !memcmp("mem=", from, 4))
+	for (;;) {
+		if (c == ' ' && *(unsigned long *)from == *(unsigned long *)"mem=")
 			memory_end = simple_strtoul(from+4, &from, 0);
-		c = *(to++) = *(from++);
-	} while (c);
+		c = *(from++);
+		if (!c)
+			break;
+		if (COMMAND_LINE_SIZE <= ++len)
+			break;
+		*(to++) = c;
+	}
+	*to = '\0';
 }
 
 static void copro_timeout(void)
@@ -481,7 +492,7 @@ void init(void)
 {
 	int pid,i;
 
-	setup((void *) &drive_info);
+	setup();
 	sprintf(term, "TERM=con%dx%d", ORIG_VIDEO_COLS, ORIG_VIDEO_LINES);
 	(void) open("/dev/tty1",O_RDWR,0);
 	(void) dup(0);
